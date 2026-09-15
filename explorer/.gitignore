@@ -1,0 +1,10 @@
+# logs and caches only; everything that renders a page is tracked
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+# local pool stats, if you ever point XCOIN_STATS_DIR here
+pool/
+rig-stats.json
+# scratch renders
+render/

@@ -1,0 +1,13 @@
+# Build the native tool yourself with ./build.sh — never ship a prebuilt binary.
+/xcoin-wallet
+*.o
+
+# Python
+__pycache__/
+*.pyc
+
+# NEVER commit secrets or wallet state (these normally live in ~/.xcoin, not here)
+*.seed
+*.mmm
+card-*.auth
+*.plaintext-backup

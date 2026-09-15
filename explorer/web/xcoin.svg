@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="SuperKnet xCoin Explorer">
+  <rect width="64" height="64" fill="#c7ff2e"/>
+  <rect x="3" y="3" width="58" height="58" fill="none" stroke="#111111" stroke-width="4"/>
+  <text x="32" y="41" text-anchor="middle" font-family="Menlo,Consolas,monospace" font-size="24" font-weight="900" letter-spacing="-2" fill="#111111">SK</text>
+</svg>

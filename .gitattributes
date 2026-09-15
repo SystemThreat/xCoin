@@ -1,0 +1,3 @@
+src/clientversion.cpp export-subst
+# The charter is hashed byte for byte (Consensus::CHARTER_HASH): never let a checkout rewrite its line endings.
+contrib/regenesis/CHARTER.md text eol=lf

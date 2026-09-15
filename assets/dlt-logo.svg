@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- DLT — Distributed Ledger Technologies — official logo. Master vector. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" shape-rendering="geometricPrecision">
+  <defs>
+    <radialGradient id="g1" gradientUnits="userSpaceOnUse" cx="512.0" cy="512.0" r="563.2">
+      <stop offset="0" stop-color="#b8051a"/><stop offset="0.6" stop-color="#8a000a"/><stop offset="1" stop-color="#400005"/>
+    </radialGradient>
+    <filter id="sh1" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="0" stdDeviation="11.00" flood-color="#000" flood-opacity="0.75"/></filter>
+  </defs>
+  <circle cx="512.0" cy="512.0" r="512.0" fill="url(#g1)"/>
+  <circle cx="512.0" cy="512.0" r="471.04" fill="none" stroke="#290005" stroke-opacity="0.9" stroke-width="14"/>
+  <g filter="url(#sh1)">
+    <polygon points="739.05,417.95 317.03,362.39 561.95,491.31" fill="#ffffff"/>
+    <polygon points="479.92,755.66 739.05,417.95 561.95,491.31" fill="#d6d6d6"/>
+    <polygon points="317.03,362.39 479.92,755.66 561.95,491.31" fill="#9e9e9e"/>
+  </g>
+  <g stroke="#4d0008" stroke-opacity="0.9" stroke-width="6.00" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <line x1="739.05" y1="417.95" x2="317.03" y2="362.39"/>
+    <line x1="317.03" y1="362.39" x2="479.92" y2="755.66"/>
+    <line x1="479.92" y1="755.66" x2="739.05" y2="417.95"/>
+    <line x1="739.05" y1="417.95" x2="561.95" y2="491.31"/>
+    <line x1="317.03" y1="362.39" x2="561.95" y2="491.31"/>
+    <line x1="479.92" y1="755.66" x2="561.95" y2="491.31"/>
+  </g>
+</svg>

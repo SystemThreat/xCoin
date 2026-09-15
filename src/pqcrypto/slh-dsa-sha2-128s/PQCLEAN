@@ -1,0 +1,92 @@
+PQClean vendoring record for src/pqcrypto/slh-dsa-sha2-128s (SLH-DSA-SHA2-128s, FIPS 205)
+=========================================================================================
+
+Upstream    https://github.com/PQClean/PQClean
+Commit      0586a824fc0d49df0b6b6e9179d8d15d06d0974f (master, fetched 2026-09-05)
+Path        crypto_sign/sphincs-sha2-128s-simple/clean/  -- every .c and .h file and LICENSE
+            (the Makefiles are not copied; the file list is in src/CMakeLists.txt)
+Also        common/sha2.c, common/sha2.h -> src/pqcrypto/common/  (SHA-256/512 as PQClean
+            expects; fips202.*, randombytes.* and compat.h were already vendored for
+            ML-DSA-65 and were byte-identical to this commit's when SLH-DSA was vendored;
+            all of them have been modified since, see ../ml-dsa-65/PQCLEAN)
+META.yml    implementation "clean", upstream version
+            https://github.com/mkannwischer/sphincsplus/tree/ae132f7bf9f90205834c1cbdf5cfb9187d51f48e
+            upstream nistkat-sha256 08c2e0f08bd96f50d065ca0ced04874c709d192864bfeaccb6daa4bfa9c58a28
+            That hash describes PQClean's UNMODIFIED directory. It cannot hold for the files in
+            this directory: the FORS change below makes every signature differ from PQClean's,
+            so PQClean's KAT harness built against these files would not reproduce it, and no
+            KAT hash has been computed for the modified sources. The correctness evidence is the
+            vector file described under "Evidence" below.
+License     CC0 1.0 Universal (LICENSE in this directory)
+
+THE SOURCES ARE MODIFIED. Local changes, all inline (there is no patch file)
+----------------------------------------------------------------------------
+An earlier version of this record named a patch file, xcoin-fips205-fors-base2b.patch, that
+was never committed; the change has always been inline in fors.c.
+
+1. fors.c message_to_indices(): FIPS 205 base_2^b bit order.
+PQClean implements SPHINCS+ v3.1, not FIPS 205 SLH-DSA (PQClean issue #562, open at the
+pinned commit). For the sha2-128s-simple parameter set the two differ in one place that
+verification can observe: fors.c message_to_indices() reads the FORS index bits
+least-significant-bit first within each byte, while base_2^b in FIPS 205 reads them
+most-significant-bit first. Key generation is identical (the PQClean KAT count-0 key pair is
+reproduced bit for bit); signatures are not interchangeable. The change is one statement in
+the inner loop of message_to_indices(); upstream has
+
+    indices[i] ^= (((m[offset >> 3] >> (offset & 0x7)) & 0x1) << j);
+
+and this tree has
+
+    indices[i] ^= (uint32_t)(((m[offset >> 3] >> (7 - (offset & 0x7))) & 0x1) << (SPX_FORS_HEIGHT - 1 - j));
+
+Nothing else in fors.c differs. Evidence, all reproducible from the vectors in
+src/test/data/slh_dsa_sha2_128s_vectors.json (checked by src/test/slhkey_tests.cpp):
+
+  - OpenSSL 3.6.1, an independent FIPS 205 implementation: signatures cross-verify in both
+    directions, through both the internal interface and the pure interface
+    (M' = 0x00 || len(ctx) || ctx || M).
+  - NIST ACVP FIPS 205 SLH-DSA sigVer vectors (usnistgov/ACVP-Server,
+    gen-val/json-files/SLH-DSA-sigVer-FIPS205/internalProjection.json, vsId 53): all 28
+    SLH-DSA-SHA2-128s pure + internal cases, positive and negative, agree with the patched
+    code; the unpatched code rejects every valid signature among them.
+  - The unpatched PQClean KAT count-0 signature is a SPHINCS+ v3.1 signature and is
+    intentionally rejected (it is pinned as a negative vector).
+
+2. sign.c: the return value of randombytes() is checked in crypto_sign_keypair and
+   crypto_sign_signature and both fail closed with -1 (upstream ignores it: on an RNG failure
+   it would derive a key from an uninitialised seed, or sign with an uninitialised opt_rand);
+   crypto_sign() propagates that failure instead of returning a signed message with garbage in
+   the signature slot. randombytes itself is the node's RNG (src/pqrandom.cpp), see
+   ../ml-dsa-65/PQCLEAN item 6.
+
+3. sign.c: the spx_ctx copy of SK.seed is wiped with PQCLEAN_cleanse after key generation and
+   signing, as are the key-generation seed and opt_rand; hash_sha2.c gen_message_random() wipes
+   its HMAC pad buffer (SK.prf XOR the ipad/opad constants). PQCLEAN_cleanse is
+   ../common/cleanse.c (../ml-dsa-65/PQCLEAN item 4). Signatures are unaffected.
+
+4. ../common/sha2.h, ../common/sha2.c (vendored with this directory): the hash state is an
+   inline array in sha224ctx/sha256ctx/sha384ctx/sha512ctx instead of a malloc'd pointer.
+   Upstream mallocs in every *_inc_init and *_inc_ctx_clone and calls exit(111) when malloc
+   returns NULL; one SLH-DSA verification clones the seeded SHA-256 state thousands of times
+   from a script-verification thread, so memory exhaustion would have terminated the node.
+   Now nothing in the file can fail or allocate, and *_inc_ctx_release wipes the state instead
+   of freeing it. The API and every hash output are unchanged. (Same change as
+   ../ml-dsa-65/PQCLEAN item 5 for fips202.)
+
+5. Build: warnings are no longer suppressed with -w (../ml-dsa-65/PQCLEAN item 8). Under
+   PQClean's warning set the only warnings these sources produce are six -Wvla warnings, from
+   the deliberate PQCLEAN_VLA uses in hash_sha2.c (mgf1_256/mgf1_512: inlen + 4), utils.c and
+   utilsx1.c (treehash stacks: (tree_height + 1) * SPX_N) and thash_sha2_simple.c
+   (SPX_SHA256_ADDR_BYTES + inblocks * SPX_N); every size is bounded by a compile-time
+   parameter of this parameter set, so -Wvla is left out of the target's flags rather than
+   the code changed.
+
+Re-vendoring: copy the files listed above from the pinned commit into this directory, then
+re-apply items 1-4 by hand (diff this directory against the previous vendored copy to see
+them; item 1 is one statement), rebuild, and run
+`test_bitcoin -t slhkey_tests -t xcoin_v3_tests`.
+
+Consensus use (contrib/regenesis/REGENESIS.md section 4): witness v3 leaf 0xc2 verifies the
+32-byte sighash digest in FIPS 205 pure mode with an empty context, i.e. slh_verify_internal
+over 0x00 || 0x00 || digest -- exactly what `openssl pkeyutl -sign -rawin` produces for a
+32-byte input with no context, so an emergency signer needs no xCoin-specific code.

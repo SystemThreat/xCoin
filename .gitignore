@@ -1,0 +1,9 @@
+build/
+.build/
+*.o
+__pycache__/
+node_modules/
+.DS_Store
+wallet/xcoin-wallet
+miner/NerdMiner
+miner/MacMetalCLI

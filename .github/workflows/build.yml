@@ -1,0 +1,71 @@
+# Builds the node and runs the unit tests on every push. This is the only
+# compiler most commits in this tree ever meet: treat a red run as the fact
+# it is, not as noise.
+name: build
+
+on:
+  push:
+    branches: [regenesis, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Ubuntu 24.04 — build + unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkgconf ccache python3 \
+            libevent-dev libboost-dev libsqlite3-dev
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DENABLE_IPC=OFF
+          -DWITH_EMBEDDED_ASMAP=OFF
+          -DBUILD_BENCH=OFF
+          -DWITH_CCACHE=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s || true
+
+      - name: Unit tests
+        run: |
+          TB="$(find build -type f -name test_bitcoin -perm -u+x | head -1)"
+          test -n "$TB" || { echo "test_bitcoin not found"; exit 1; }
+          "$TB" --log_level=test_suite --report_level=short
+
+      - name: Upload configure logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-logs
+          path: |
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/CMakeFiles/CMakeError.log
+          if-no-files-found: ignore

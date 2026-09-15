@@ -1,0 +1,88 @@
+PQClean vendoring record for src/pqcrypto/ml-dsa-65 (ML-DSA-65, FIPS 204) and src/pqcrypto/common
+==================================================================================================
+
+Upstream    https://github.com/PQClean/PQClean
+Path        crypto_sign/ml-dsa-65/clean/  -- every .c and .h file and LICENSE (the Makefiles and
+            META.yml were not copied; the file list is in src/CMakeLists.txt)
+Also        common/fips202.c, common/fips202.h, common/randombytes.h, common/compat.h
+            -> src/pqcrypto/common/  (common/sha2.c and sha2.h arrived later with SLH-DSA, see
+            ../slh-dsa-sha2-128s/PQCLEAN; common/randombytes.c was vendored too and has since
+            been removed, see below)
+Commit      NOT RECORDED when the directory was vendored (this repository's commit 37c4741,
+            "NEX -- post-quantum Bitcoin fork"). The files carry no version marker of their own.
+            The only evidence in the tree: when SLH-DSA was vendored from PQClean master commit
+            0586a824fc0d49df0b6b6e9179d8d15d06d0974f (fetched 2026-09-05), the common/ files
+            already present from this directory's vendoring were found byte-identical to that
+            commit's, so ML-DSA-65 was most likely taken from the same or a nearby master commit.
+            Anyone re-vendoring must diff the whole directory against upstream rather than rely
+            on this guess.
+License     MIT (LICENSE in this directory; the upstream reference implementation is public domain
+            / CC0 and PQClean's packaging is MIT)
+KAT hash    None is claimed. No PQClean nistkat hash was ever computed for these files, and the
+            sources are modified (below), so an upstream nistkat hash for
+            crypto_sign/ml-dsa-65/clean does not apply to this directory. The correctness
+            evidence is NIST's own FIPS 204 ACVP vectors pinned in
+            src/test/data/ml_dsa_65_fips204.json and checked by src/test/ml_dsa_kat_tests.cpp:
+            all 10 keyGen vectors reproduce NIST's public and secret keys byte for byte from the
+            seed, all 15 sigVer vectors accept and reject exactly as NIST says, and an OpenSSL
+            3.6.4 signature over a 32-byte message with an empty context (the chain's signing
+            mode) verifies through CPQPubKey::Verify.
+
+THE SOURCES ARE MODIFIED. Local changes, all inline (there is no patch file):
+------------------------------------------------------------------------------
+
+1. sign.c, sign.h, api.h: two functions added (this repository's commit 9d8b1ad):
+     PQCLEAN_MLDSA65_CLEAN_crypto_sign_keypair_from_seed(pk, sk, seed)
+       crypto_sign_keypair with the 32-byte FIPS 204 KeyGen_internal seed xi supplied by the
+       caller instead of drawn from randombytes (deterministic HD key derivation);
+     PQCLEAN_MLDSA65_CLEAN_crypto_sign_sk_to_pk(pk, sk)
+       recomputes (rho, t1) from an unpacked secret key.
+   Neither touches the existing functions; keygen and verification agree with FIPS 204 (above).
+
+2. sign.c: the return value of randombytes() is checked in crypto_sign_keypair and
+   crypto_sign_signature_ctx and both fail closed with -1 (upstream ignores it and would
+   continue with an uninitialised buffer). Commit 9049774 ("H-03").
+
+3. sign.c: secret intermediates are wiped with PQCLEAN_cleanse (below) on every exit path:
+   seedbuf (xi / rhoprime / K / rnd), s1, s1hat, s2, t0 in keypair, keypair_from_seed and
+   sk_to_pk; seedbuf, s1, s2, t0, y, z, w0 in crypto_sign_signature_ctx. The earlier
+   memset()-based wipes on the failure paths were dead-store-eliminated by the optimizer and
+   never executed in the built object. Signatures and verification are unaffected (the wipes
+   run after the outputs are written).
+
+4. common/cleanse.c, common/cleanse.h: NEW, not in PQClean. PQCLEAN_cleanse(ptr, len) is a
+   memset followed by an asm memory barrier (SecureZeroMemory on Windows), the same construct as
+   the node's memory_cleanse (src/support/cleanse.cpp), so the stores cannot be removed as dead.
+
+5. common/fips202.h, common/fips202.c: the Keccak state is an inline array in every context
+   struct (uint64_t ctx[26] / ctx[25]) instead of a malloc'd pointer. Upstream mallocs the state
+   in every *_inc_init / *_absorb / *_ctx_clone and calls exit(111) when malloc returns NULL,
+   which would terminate the node from a script-verification thread under memory exhaustion.
+   Now no function in this file can fail or allocate, and *_ctx_release wipes the state with
+   PQCLEAN_cleanse instead of freeing it. The API (function names, argument types, the
+   PQC_SHAKE*CTX_BYTES macros) and every hash output are unchanged; only sizeof(the context
+   structs) grew. The same change was applied to common/sha2.h and common/sha2.c (recorded in
+   ../slh-dsa-sha2-128s/PQCLEAN, which vendored those two files).
+
+6. common/randombytes.c: REMOVED from the tree. common/randombytes.h is unchanged and still
+   declares PQCLEAN_randombytes; the definition is src/pqrandom.cpp (node code, built into
+   bitcoin_util), which serves every request from the node's GetStrongRandBytes in 32-byte
+   chunks and returns 0. PQClean's own file called the OS RNG directly (getrandom / getentropy /
+   BCryptGenRandom), bypassing the node's RNG.
+
+7. common/compat.h: `#if __clang__major__ < 9` corrected to `__clang_major__`. Upstream tests an
+   undefined macro (always 0, so the pre-clang-9 vector-type polyfill was always emitted under
+   clang, and -Wundef warns). No effect on any output.
+
+8. Build (src/CMakeLists.txt, target pqcrypto): warnings are no longer suppressed with -w; the
+   target builds with PQClean's own warning set (minus -Wvla, see ../slh-dsa-sha2-128s/PQCLEAN)
+   and the node's hardening flags (_FORTIFY_SOURCE=3, -fstack-protector-all, -fcf-protection,
+   -fstack-clash-protection, branch protection where the C compiler supports them) and with the
+   sanitizer flags of a sanitizer build. The ML-DSA-65 sources compile without a warning under
+   that set on Apple clang 21 (arm64).
+
+Re-vendoring: copy crypto_sign/ml-dsa-65/clean/*.{c,h} and the common/ files listed above from
+the chosen upstream commit, record that commit here, re-apply items 1-3 and 5-7 by hand
+(diff this directory against the previous vendored copy to see them), do NOT re-add
+common/randombytes.c to the build, rebuild, and run
+`test_bitcoin -t ml_dsa_kat_tests -t pqkey_tests -t xcoin_v3_tests -t xcoin_descriptor_tests`.

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>NerdMiner MD</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+<header class="topbar"><a class="brand" id="brandLink" href="#"><span class="brand-mark">MD</span><span><span class="brand-name">NerdMiner MD</span><span class="brand-tag">mine on the machine you already own</span></span></a><span class="onl" id="onl" title="signed-in members seen in the last 2 minutes — on the site, in chat, or running this extension">— in chat</span></header>
+
+<section class="hero" id="hero">
+  <div class="manifesto">
+    <p class="eyebrow" id="eyebrow">YOUR RIG</p>
+    <div class="hr" id="hr">—</div>
+    <div class="sub" id="sub">connecting to NerdMiner…</div>
+    <canvas id="spark" width="360" height="36"></canvas>
+  </div>
+  <div class="definition">
+    <p class="eyebrow dark">BLOCKS</p>
+    <div class="big" id="blocks">—</div>
+    <div class="small" id="blocksub">this run</div>
+  </div>
+</section>
+
+<section class="grid" id="grid">
+  <div class="card"><span class="lbl">Accepted</span><span class="val" id="acc">—</span></div>
+  <div class="card"><span class="lbl">Rejected</span><span class="val" id="rej">—</span></div>
+  <div class="card"><span class="lbl">Difficulty</span><span class="val small" id="diff">—</span></div>
+  <div class="card"><span class="lbl">Uptime</span><span class="val small" id="up">—</span></div>
+  <div class="card"><span class="lbl">DAG</span><span class="val small" id="dag">—</span></div>
+  <div class="card"><span class="lbl">Best share</span><span class="val small" id="best">—</span></div>
+</section>
+<div class="meta" id="meta"></div>
+
+<section class="chat">
+  <div class="chat-head"><span class="lbl">#rigs · live</span><span class="lbl" id="who">—</span></div>
+  <div class="log" id="log"><p class="muted">loading…</p></div>
+  <p class="muted" id="why" hidden></p>
+  <form id="say" class="say" novalidate><input id="msg" maxlength="280" autocomplete="off" placeholder="sign in to chat"><button class="btn primary" type="submit">Send</button></form>
+</section>
+
+<footer class="foot"><a id="openSite" href="#">Open MineDifferent</a><a id="openLogin" href="#">Sign in</a><a id="openOpts" href="#">Options</a></footer>
+<script type="module" src="popup.js"></script>
+</body></html>

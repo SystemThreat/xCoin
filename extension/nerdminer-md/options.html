@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>NerdMiner MD · Options</title><link rel="stylesheet" href="popup.css">
+<style>body{width:auto;max-width:560px;max-height:none;display:block;overflow:visible;padding:0 0 12px}.opt{padding:14px 12px;border-bottom:1px solid var(--soft-line)}.opt label{display:block;font-size:9px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px}.opt input{width:100%;min-height:36px;border:2px solid var(--line);border-radius:0;padding:6px 8px;outline:none}.opt input:focus{box-shadow:0 0 0 3px var(--accent)}.hint{color:var(--muted);font-size:11px;margin:6px 0 0}.row{display:flex;gap:8px;padding:12px}#state{padding:0 12px;font-size:11px;font-weight:900;letter-spacing:.02em;word-break:break-word}.hint code{font-weight:700}</style></head>
+<body>
+<header class="topbar"><span class="brand"><span class="brand-mark">MD</span><span><span class="brand-name">NerdMiner MD</span><span class="brand-tag">options</span></span></span></header>
+<div class="opt"><label>Companion token (optional)</label><input id="token" placeholder="leave empty with NerdMiner 4.1 or newer" autocomplete="off" spellcheck="false"><p class="hint">NerdMiner 4.1 links to this extension on its own: nothing to paste. Only an older NerdMiner asks for its token, printed once at startup and kept in ~/Library/Application Support/NerdMiner/companion-token (<code>cat ~/Library/Application\ Support/NerdMiner/companion-token</code>); pasting the whole line is fine.</p></div>
+<div class="opt"><label>NerdMiner stats URL</label><input id="cliUrl" placeholder="http://127.0.0.1:47475" spellcheck="false"><p class="hint">Change only if you started NerdMiner with --stats-port. It prints "Companion stats: http://127.0.0.1:&lt;port&gt;/stats" at startup; that port goes here.</p></div>
+<div class="opt"><label>MineDifferent</label><input id="site" placeholder="https://minedifferent.com"><p class="hint">The forum. Sign in there once; the extension reuses that session for chat and presence.</p></div>
+<div class="row"><button class="btn primary" id="save">Save</button><button class="btn" id="test">Test connection</button></div>
+<div id="state"></div>
+<script type="module" src="options.js"></script>
+</body></html>
