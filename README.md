@@ -1,12 +1,12 @@
 <p align="center">
   <img src="assets/dlt-logo.svg" width="120" alt="Distributed Ledger Technologies"><br>
-  <b>xCoin (XCF)</b><br>
-  <i>Post-quantum proof-of-work money. XCF is xCoin Finality.</i><br><br>
+  <b>xCoin Ӿ (XCF)</b><br>
+  <i>Post-quantum proof-of-work money. XCF is xCoin Finality; Ӿ is its symbol.</i><br><br>
   <sub>21,000,000 XCF, all of it mined · the Charter committed in the genesis block · 300-second blocks · MetalDAG</sub>
 </p>
 
 <p align="center">
-  <b>Testnet A rehearsal: running</b> · Mainnet genesis: not mined<br>
+  <b>Testnet A rehearsal: running</b> · Mainnet genesis: September 30, 2026<br>
   <a href="https://distributedledgertechnologies.com">Distributed Ledger Technologies</a> ·
   <a href="https://xcoinproject.com/whitepaper">Whitepaper</a> ·
   <a href="CHARTER.md">Charter</a> ·
