@@ -252,16 +252,23 @@ BOOST_AUTO_TEST_CASE(mainnet_v2_identity_and_startup_gate)
     BOOST_CHECK_EQUAL(main->GetDefaultPort(), 9333);
     BOOST_CHECK_EQUAL(main->Bech32HRP(), "xpa");
 
-    // The startup gate: mainnet + placeholder genesis refuses unless overridden;
-    // the other chains and a final genesis never refuse.
-    BOOST_CHECK(!main->GenesisIsFinal()); // until cutover step 3 pastes the xcoin-genesis output
-    BOOST_CHECK_EQUAL(main->GenesisBlock().GetHash(), Consensus::V1_GENESIS_HASH);
-    const std::optional<std::string> refusal{CheckGenesisFinalityForStartup(*main, /*allow_unfinal_genesis=*/false)};
-    BOOST_REQUIRE(refusal.has_value());
-    BOOST_CHECK(refusal->find("GENESIS_IS_FINAL") != std::string::npos);
-    BOOST_CHECK(refusal->find("-allowunfinalgenesis") != std::string::npos);
-    BOOST_CHECK(refusal->find(Consensus::V1_GENESIS_HASH.ToString()) != std::string::npos);
-    BOOST_CHECK(!CheckGenesisFinalityForStartup(*main, /*allow_unfinal_genesis=*/true));
+    // The startup gate, in whichever state the tree is in. Before cutover step 3
+    // (placeholder genesis): mainnet refuses to start unless overridden. After
+    // the paste (GENESIS_IS_FINAL): mainnet starts unconditionally. Asserting
+    // only the placeholder state made REGENESIS.md section 8's "test_bitcoin
+    // green" impossible at the ceremony itself — found by rehearsal 2.
+    if (main->GenesisIsFinal()) {
+        BOOST_CHECK(main->GenesisBlock().GetHash() != Consensus::V1_GENESIS_HASH);
+        BOOST_CHECK(!CheckGenesisFinalityForStartup(*main, /*allow_unfinal_genesis=*/false));
+    } else {
+        BOOST_CHECK_EQUAL(main->GenesisBlock().GetHash(), Consensus::V1_GENESIS_HASH);
+        const std::optional<std::string> refusal{CheckGenesisFinalityForStartup(*main, /*allow_unfinal_genesis=*/false)};
+        BOOST_REQUIRE(refusal.has_value());
+        BOOST_CHECK(refusal->find("GENESIS_IS_FINAL") != std::string::npos);
+        BOOST_CHECK(refusal->find("-allowunfinalgenesis") != std::string::npos);
+        BOOST_CHECK(refusal->find(Consensus::V1_GENESIS_HASH.ToString()) != std::string::npos);
+        BOOST_CHECK(!CheckGenesisFinalityForStartup(*main, /*allow_unfinal_genesis=*/true));
+    }
     // Testnet A's genesis is final (re-mined 2026-09-14); the startup gate itself
     // is mainnet-only by design.
     BOOST_CHECK(testnet->GenesisIsFinal());
