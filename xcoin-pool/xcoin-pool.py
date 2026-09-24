@@ -1214,7 +1214,8 @@ def require_own_node():
             "to the network; a pool on its own node is one more independent verifier. "
             "Install the node: github.com/SystemThreat/xCoin")
 
-async def main():    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+async def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     require_own_node()
     if CFG["rpc_cookie"]:
         if not os.path.isfile(CFG["rpc_cookie"]):
