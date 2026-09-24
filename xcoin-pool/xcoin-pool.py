@@ -1194,8 +1194,28 @@ async def poll_loop():
                     log.warning("silent vardiff failed for %s: %s", s.worker, e)
         await asyncio.sleep(CFG["poll_secs"])
 
-async def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+def require_own_node():
+    """The own-node rule: the pool's node is THIS machine's node, or the pool
+    does not run. Only literal loopback addresses pass — a hostname that merely
+    resolves to loopback is an evasion nobody legitimately needs."""
+    host = str(CFG["rpc_host"]).strip().strip("[]").lower()
+    ok = host == "localhost"
+    if not ok:
+        try:
+            import ipaddress
+            ok = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            ok = False
+    if not ok:
+        raise SystemExit(
+            f"XCOIN_RPC_HOST={CFG['rpc_host']}: refused. The own-node rule: to run a pool "
+            "you run a full node ON THIS MACHINE and point the pool at it over loopback "
+            "(XCOIN_RPC_HOST=127.0.0.1). A pool that leans on a remote node adds nothing "
+            "to the network; a pool on its own node is one more independent verifier. "
+            "Install the node: github.com/SystemThreat/xCoin")
+
+async def main():    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    require_own_node()
     if CFG["rpc_cookie"]:
         if not os.path.isfile(CFG["rpc_cookie"]):
             raise SystemExit(f"XCOIN_RPC_COOKIE={CFG['rpc_cookie']}: no such file. Is nexd running with that datadir?")
@@ -1209,6 +1229,7 @@ async def main():
     if not info:
         raise SystemExit("Cannot reach nexd RPC — is the node running and are the creds right?")
     log.info("connected to nexd: chain=%s height=%s", info.get("chain"), info.get("blocks"))
+    log.info("own-node rule satisfied: RPC on loopback — this pool stands on its own verifier")
 
     # The address HRP is the node's, not the environment's. Trusting the env var means one
     # wrong export can point a rehearsal pool at the wrong rule set: with hrp=nxrt the pool

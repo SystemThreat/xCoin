@@ -40,7 +40,7 @@ The binaries are `build/bin/nexd`, `nex-cli`, `test_bitcoin` and `xcoin-genesis`
 | Genesis nonce / bits | `166982` / `0x1e0fffff` | TBD |
 | Genesis merkle root | `b49ffb666442033ee8908bd83f4e458e1ccafcb620f844acff6b7dbde727d0f8` | TBD |
 | MetalDAG PoW hash of the genesis | `000003ae512afefde0e58261f26308e2822b3f73f1beb8e67ff448d12c8c78e8` | TBD |
-| Coinbase message | `xCoin testnet A - 2026-09-14 - 2,100,000,000,000,000 sats, 21M XCF` | `Hic experimentum prosperat II - <date> - 21,000,000 XCF - charter <first 16 hex of CHARTER_HASH>` |
+| Coinbase message | `xCoin testnet A - 2026-09-14 - 2,100,000,000,000,000 sats, 21M XCF` | `Hic experimentum prosperat - <UTC date of -time> - 2,100,000,000,000,000 sats, 21M XCF` (`charter::GenesisMessage`; no numeral — this is the genesis, not a second one — and no charter hex: the full 32-byte hash lives in the coinbase output) |
 | Charter output | `OP_RETURN "XCOIN/charter/1" ‖ CHARTER_HASH`, the coinbase's only output, value 0 | same |
 | CHARTER_HASH | `415b1dbc7ff2cd14b747b300ecd95862540e12305a801bb2bfed8b93c5d84689` | same |
 | CURRENCY_ID (`getcharter`) | `fb9c965c9b2c61d9f1f3471d96a775f764389142b838f63c183913b38b71029e` | TBD |

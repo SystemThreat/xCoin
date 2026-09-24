@@ -6,8 +6,8 @@
 // (contrib/regenesis/REGENESIS.md sections 1 and 8, cutover step 3).
 //
 // The block is charter::CreateGenesisBlock(): a coinbase whose scriptSig
-// carries the message "Hic experimentum prosperat II - <date> - 21,000,000 XCF
-// - charter <first 16 hex of CHARTER_HASH>" and whose only output is the
+// carries charter::GenesisMessage() — "Hic experimentum prosperat - <date> -
+// 2,100,000,000,000,000 sats, 21M XCF" — and whose only output is the
 // zero-value OP_RETURN charter commitment ("XCOIN/charter/1" || CHARTER_HASH ||
 // SHA-256(v1 genesis header)). Nothing is minted. The coinbase is run through
 // CheckTransaction so an over-long message (bad-cb-length, 100-byte scriptSig)
