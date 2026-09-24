@@ -137,6 +137,13 @@ if(WITH_ZMQ)
 endif()
 
 option(WITH_EMBEDDED_ASMAP "Embed default ASMap data." ON)
+# The data file is generated (asmap-tool, from BGP data) and may be absent from
+# a fresh clone. Absent file = no embedding, loudly — never a broken build; a
+# node without an embedded ASMap still runs and can load one with -asmap=.
+if(WITH_EMBEDDED_ASMAP AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/node/data/ip_asn.dat")
+  message(WARNING "src/node/data/ip_asn.dat not present; building WITHOUT embedded ASMap (WITH_EMBEDDED_ASMAP=OFF).")
+  set(WITH_EMBEDDED_ASMAP OFF)
+endif()
 
 option(WITH_USDT "Enable tracepoints for Userspace, Statically Defined Tracing." OFF)
 if(WITH_USDT)
