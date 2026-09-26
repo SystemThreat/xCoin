@@ -206,11 +206,11 @@ class SettlementLevy(unittest.TestCase):
         self.assertEqual(X.settlement_levy(2000, bp=5), 1)       # exactly 1
         self.assertEqual(X.settlement_levy(2001, bp=5), 2)
         self.assertEqual(X.settlement_levy(10_000, bp=5), 5)
-        self.assertEqual(X.settlement_levy(100_000_000, bp=5), 50_000)   # 1 XCF -> 0.0005 XCF
+        self.assertEqual(X.settlement_levy(100_000_000, bp=5), 50_000)   # 1 XID -> 0.0005 XID
 
     def test_matches_the_definition_on_a_wide_range(self):
         for bp in (1, 5, 250):
-            for out in (1, 7, 999, 1234567, 10**8, 76_650 * 10**8, 21_000_000 * 10**8):
+            for out in (1, 7, 999, 1234567, 10**8, 76_650 * 10**8, 100_000_000 * 10**8 - 1, 100_000_000 * 10**8):  # up to the cap
                 self.assertEqual(X.settlement_levy(out, bp=bp), -(-out * bp // X.LEVY_DENOMINATOR))
 
 

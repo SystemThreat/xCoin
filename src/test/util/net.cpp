@@ -403,7 +403,8 @@ bool DynSock::WaitMany(std::chrono::milliseconds timeout, EventsPerSock& events_
             if ((events.requested & Sock::RECV) != 0) {
                 auto dyn_sock = reinterpret_cast<const DynSock*>(sock.get());
                 uint8_t b;
-                if (dyn_sock->m_pipes->recv.GetBytes(&b, 1, MSG_PEEK) == 1 || !dyn_sock->m_accept_sockets->Empty()) {
+                // Readable when there is data or EOF (a Recv() of 0), as poll(2) reports a closed peer.
+                if (dyn_sock->m_pipes->recv.GetBytes(&b, 1, MSG_PEEK) >= 0 || !dyn_sock->m_accept_sockets->Empty()) {
                     events.occurred |= Sock::RECV;
                     at_least_one_event_occurred = true;
                 }

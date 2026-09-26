@@ -178,6 +178,7 @@ class NetTest(BitcoinTestFramework):
                 "synced_blocks": -1,
                 "synced_headers": -1,
                 "timeoffset": 0,
+                "transport_hybrid": False,
                 "transport_protocol_type": "v1" if not self.options.v2transport else "v2",
                 "version": 0,
             },

@@ -2,7 +2,9 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <bip324.h>
 #include <chainparams.h>
+#include <crypto/mlkem768.h>
 #include <hash.h>
 #include <net.h>
 #include <netmessagemaker.h>
@@ -13,7 +15,9 @@
 #include <util/chaintype.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -104,8 +108,16 @@ FUZZ_TARGET(p2p_transport_serialization, .init = initialize_p2p_transport_serial
 
 namespace {
 
+/** How the handshake between the two transports is expected to end (XIP-4). */
+struct Expectation {
+    /** The side (0 initiator, 1 responder) whose ReceivedBytes() must return false, which ends the simulation. */
+    std::optional<int> fail_side;
+    /** Both sides end in a confirmed HX1 session. */
+    bool hybrid{false};
+};
+
 template<RandomNumberGenerator R>
-void SimulationTest(Transport& initiator, Transport& responder, R& rng, FuzzedDataProvider& provider)
+void SimulationTest(Transport& initiator, Transport& responder, R& rng, FuzzedDataProvider& provider, const Expectation& expect = {})
 {
     // Simulation test with two Transport objects, which send messages to each other, with
     // sending and receiving fragmented into multiple pieces that may be interleaved. It primarily
@@ -131,6 +143,12 @@ void SimulationTest(Transport& initiator, Transport& responder, R& rng, FuzzedDa
     // Whether more bytes to be sent are expected on transport[i], before and after
     // SetMessageToSend().
     std::array<std::optional<bool>, 2> expect_more, expect_more_next;
+
+    // Whether the side expected to refuse the handshake has done so, which ends the simulation.
+    bool failed{false};
+
+    // How many messages each side has queued so far.
+    std::array<unsigned, 2> queued_count{0, 0};
 
     // Function to consume a message type.
     auto msg_type_fn = [&]() {
@@ -216,6 +234,7 @@ void SimulationTest(Transport& initiator, Transport& responder, R& rng, FuzzedDa
         if (queued) {
             // Remember that this message is now expected by the receiver.
             expected[side].emplace_back(std::move(next_msg[side]));
+            ++queued_count[side];
             // Construct a new next message to send.
             next_msg[side] = make_msg_fn(/*first=*/false);
         }
@@ -258,8 +277,13 @@ void SimulationTest(Transport& initiator, Transport& responder, R& rng, FuzzedDa
             size_t old_len = to_recv.size();
             bool ret = transports[!side]->ReceivedBytes(to_recv);
             // Bytes must always be accepted, as this test does not introduce any errors in
-            // communication.
-            assert(ret);
+            // communication, except by the side expected to refuse the handshake (XIP-4). The node
+            // closes the connection there, so nothing is processed after it.
+            if (!ret) {
+                assert(expect.fail_side == (side == 0 ? 1 : 0));
+                failed = true;
+                return true;
+            }
             // Clear cached expected 'more' information: if certainly no more data was to be sent
             // before, receiving bytes makes this uncertain.
             if (expect_more[!side] == false) expect_more[!side] = std::nullopt;
@@ -294,7 +318,7 @@ void SimulationTest(Transport& initiator, Transport& responder, R& rng, FuzzedDa
     };
 
     // Main loop, interleaving new messages, sends, and receives.
-    LIMITED_WHILE(provider.remaining_bytes(), 1000) {
+    LIMITED_WHILE(provider.remaining_bytes() && !failed, 1000) {
         CallOneOf(provider,
             // (Try to) give the next message to the transport.
             [&] { new_msg_fn(/*side=*/0); },
@@ -310,13 +334,30 @@ void SimulationTest(Transport& initiator, Transport& responder, R& rng, FuzzedDa
 
     // When we're done, perform sends and receives of existing messages to flush anything already
     // in flight.
-    while (true) {
-        bool any = false;
-        if (send_fn(/*side=*/0, /*everything=*/true)) any = true;
-        if (send_fn(/*side=*/1, /*everything=*/true)) any = true;
-        if (recv_fn(/*side=*/0, /*everything=*/true)) any = true;
-        if (recv_fn(/*side=*/1, /*everything=*/true)) any = true;
-        if (!any) break;
+    auto flush_fn = [&] {
+        while (!failed) {
+            bool any = false;
+            if (send_fn(/*side=*/0, /*everything=*/true)) any = true;
+            if (send_fn(/*side=*/1, /*everything=*/true)) any = true;
+            if (recv_fn(/*side=*/0, /*everything=*/true)) any = true;
+            if (recv_fn(/*side=*/1, /*everything=*/true)) any = true;
+            if (!any) break;
+        }
+    };
+    flush_fn();
+
+    // A hybrid responder confirms its keys on the initiator's first stage-2 packet, a require-mode
+    // responder refuses v1 on the initiator's first bytes (XIP-4), and a v2 responder only detects a v1
+    // initiator from its first 16 bytes: have the initiator send a message if the fuzzer did not.
+    if (!failed && (expect.hybrid || expect.fail_side || transports[1]->GetInfo().transport_type == TransportProtocolType::DETECTING) &&
+        queued_count[0] == 0) {
+        new_msg_fn(/*side=*/0);
+        flush_fn();
+    }
+
+    if (expect.fail_side) {
+        assert(failed);
+        return;
     }
 
     // Make sure nothing is left in flight.
@@ -327,8 +368,13 @@ void SimulationTest(Transport& initiator, Transport& responder, R& rng, FuzzedDa
     assert(expected[0].empty());
     assert(expected[1].empty());
 
-    // Compare session IDs.
-    assert(transports[0]->GetInfo().session_id == transports[1]->GetInfo().session_id);
+    // Compare session IDs and transport types, and check the HX1 state (XIP-4).
+    const auto info0{transports[0]->GetInfo()};
+    const auto info1{transports[1]->GetInfo()};
+    assert(info0.session_id == info1.session_id);
+    assert(info0.transport_type == info1.transport_type);
+    assert(info0.hybrid == expect.hybrid);
+    assert(info1.hybrid == expect.hybrid);
 }
 
 std::unique_ptr<Transport> MakeV1Transport(NodeId nodeid) noexcept
@@ -336,8 +382,21 @@ std::unique_ptr<Transport> MakeV1Transport(NodeId nodeid) noexcept
     return std::make_unique<V1Transport>(nodeid);
 }
 
+/** ML-KEM calls with seeds from the RNG, so that a run is reproducible; the node's own random path is for the
+ *  unit tests. */
 template<RandomNumberGenerator RNG>
-std::unique_ptr<Transport> MakeV2Transport(NodeId nodeid, bool initiator, RNG& rng, FuzzedDataProvider& provider)
+V2HybridKem FixedSeedKem(RNG& rng)
+{
+    std::array<std::byte, 32> d, z, m;
+    for (auto* seed : {&d, &z, &m}) std::ranges::copy(rng.template randbytes<std::byte>(32), seed->begin());
+    V2HybridKem kem;
+    kem.keygen = [d, z] { return mlkem768::KeyGen(d, z); };
+    kem.encaps = [m](std::span<const std::byte, mlkem768::ENCAPS_KEY_SIZE> ek) { return mlkem768::Encaps(ek, m); };
+    return kem;
+}
+
+template<RandomNumberGenerator RNG>
+std::unique_ptr<Transport> MakeV2Transport(NodeId nodeid, bool initiator, RNG& rng, FuzzedDataProvider& provider, V2HybridMode mode, V2HybridCounters* counters)
 {
     // Retrieve key
     auto key = ConsumePrivateKey(provider);
@@ -367,7 +426,46 @@ std::unique_ptr<Transport> MakeV2Transport(NodeId nodeid, bool initiator, RNG& r
              .Write(garb.data(), garb.size())
              .Finalize(UCharCast(ent.data()));
 
-    return std::make_unique<V2Transport>(nodeid, initiator, key, ent, std::move(garb));
+    return std::make_unique<V2Transport>(nodeid, initiator, key, ent, std::move(garb), mode, FixedSeedKem(rng), counters);
+}
+
+/** Both sides' -v2hybrid modes and how the handshake between them ends (XIP-4, "Interop matrix"). */
+struct ModePair {
+    V2HybridMode initiator;
+    V2HybridMode responder;
+    Expectation expect;
+};
+
+ModePair ConsumeModePair(FuzzedDataProvider& provider)
+{
+    const uint8_t v{provider.ConsumeIntegral<uint8_t>()};
+    ModePair modes{static_cast<V2HybridMode>(v % 3), static_cast<V2HybridMode>((v / 3) % 3), {}};
+    const bool off_initiator{modes.initiator == V2HybridMode::OFF};
+    const bool off_responder{modes.responder == V2HybridMode::OFF};
+    if (off_initiator && modes.responder == V2HybridMode::REQUIRE) {
+        modes.expect.fail_side = 1;
+    } else if (modes.initiator == V2HybridMode::REQUIRE && off_responder) {
+        modes.expect.fail_side = 0;
+    } else {
+        modes.expect.hybrid = !off_initiator && !off_responder;
+    }
+    return modes;
+}
+
+/** What a side in `mode` has counted once the simulation ends (XIP-4, "What a node reports"). */
+void CheckCounters(const V2HybridCounters& counters, V2HybridMode mode, const Expectation& expect, int side)
+{
+    std::array<uint64_t, V2_HYBRID_OUTCOMES> want{};
+    if (mode != V2HybridMode::OFF) {
+        if (expect.fail_side == side) {
+            want[static_cast<size_t>(V2HybridOutcome::REFUSED)] = 1;
+        } else if (expect.hybrid) {
+            want[static_cast<size_t>(V2HybridOutcome::HYBRID)] = 1;
+        } else {
+            want[static_cast<size_t>(V2HybridOutcome::CLASSICAL)] = 1;
+        }
+    }
+    for (size_t i{0}; i < want.size(); ++i) assert(counters[i].load() == want[i]);
 }
 
 } // namespace
@@ -385,22 +483,34 @@ FUZZ_TARGET(p2p_transport_bidirectional, .init = initialize_p2p_transport_serial
 
 FUZZ_TARGET(p2p_transport_bidirectional_v2, .init = initialize_p2p_transport_serialization)
 {
-    // Test with two V2 transports talking to each other.
+    // Test with two V2 transports talking to each other, in every pair of -v2hybrid modes (XIP-4).
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     InsecureRandomContext rng(provider.ConsumeIntegral<uint64_t>());
-    auto t1 = MakeV2Transport(NodeId{0}, true, rng, provider);
-    auto t2 = MakeV2Transport(NodeId{1}, false, rng, provider);
+    const ModePair modes{ConsumeModePair(provider)};
+    std::array<V2HybridCounters, 2> counters{};
+    auto t1 = MakeV2Transport(NodeId{0}, true, rng, provider, modes.initiator, &counters[0]);
+    auto t2 = MakeV2Transport(NodeId{1}, false, rng, provider, modes.responder, &counters[1]);
     if (!t1 || !t2) return;
-    SimulationTest(*t1, *t2, rng, provider);
+    SimulationTest(*t1, *t2, rng, provider, modes.expect);
+    CheckCounters(counters[0], modes.initiator, modes.expect, /*side=*/0);
+    CheckCounters(counters[1], modes.responder, modes.expect, /*side=*/1);
 }
 
 FUZZ_TARGET(p2p_transport_bidirectional_v1v2, .init = initialize_p2p_transport_serialization)
 {
-    // Test with a V1 initiator talking to a V2 responder.
+    // Test with a V1 initiator talking to a V2 responder, in every -v2hybrid mode: require refuses v1 (XIP-4).
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     InsecureRandomContext rng(provider.ConsumeIntegral<uint64_t>());
+    const auto mode{static_cast<V2HybridMode>(provider.ConsumeIntegral<uint8_t>() % 3)};
+    Expectation expect;
+    if (mode == V2HybridMode::REQUIRE) expect.fail_side = 1;
+    V2HybridCounters counters{};
     auto t1 = MakeV1Transport(NodeId{0});
-    auto t2 = MakeV2Transport(NodeId{1}, false, rng, provider);
+    auto t2 = MakeV2Transport(NodeId{1}, false, rng, provider, mode, &counters);
     if (!t1 || !t2) return;
-    SimulationTest(*t1, *t2, rng, provider);
+    SimulationTest(*t1, *t2, rng, provider, expect);
+    // A v1 session counts nothing; a refusal counts once.
+    for (size_t i{0}; i < counters.size(); ++i) {
+        assert(counters[i].load() == (i == static_cast<size_t>(V2HybridOutcome::REFUSED) && expect.fail_side ? 1U : 0U));
+    }
 }

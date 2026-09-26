@@ -75,33 +75,33 @@ target_link_libraries(pqcrypto
     bitcoin_util
 )
 
-# The vendored C parses attacker-supplied keys and signatures in consensus, so
-# it gets the same hardening as the C++ (the core_interface block in the
-# top-level CMakeLists.txt), checked against the C compiler here because
-# core_interface's flags were probed with the C++ compiler. Warnings are
-# PQClean's own set (its Makefiles build with -Werror under these flags), not
-# suppressed: every warning that appears in these sources is a bug or a
+# The vendored C parses attacker-supplied keys and signatures in consensus
+# (PQClean) or handshake data from any peer (mlkem-native, below), so it gets
+# the same hardening as the C++ (the core_interface block in the top-level
+# CMakeLists.txt), checked against the C compiler here because
+# core_interface's flags were probed with the C++ compiler. Warnings are each
+# upstream's own set (their Makefiles build with -Werror under these flags),
+# not suppressed: every warning that appears in these sources is a bug or a
 # documented local change.
 include(CheckCCompilerFlag)
 include(CheckCSourceCompiles)
-function(pqcrypto_try_append_c_flag flag)
+function(vendored_c_try_append_flag target flag)
   string(MAKE_C_IDENTIFIER "${flag}" id_string)
   string(TOUPPER "${id_string}" id_string)
   set(CMAKE_REQUIRED_FLAGS "-Werror")
   check_c_compiler_flag("${flag}" C_SUPPORTS_${id_string})
   if(C_SUPPORTS_${id_string})
-    target_compile_options(pqcrypto PRIVATE ${flag})
+    target_compile_options(${target} PRIVATE ${flag})
   endif()
 endfunction()
-if(MSVC)
-  target_compile_options(pqcrypto PRIVATE /W3)
-else()
-  # PQClean's own warning set minus -Wvla: the SLH-DSA sources use the
-  # PQCLEAN_VLA macro on purpose, with sizes bounded by compile-time parameters
-  # (tree heights, WOTS chain counts, seed lengths), so those six warnings are
-  # not actionable; see pqcrypto/slh-dsa-sha2-128s/PQCLEAN.
-  foreach(flag IN ITEMS -Wall -Wextra -Wpedantic -Wshadow -Wmissing-prototypes -Wredundant-decls -Wcast-align -Wpointer-arith -Wundef)
-    pqcrypto_try_append_c_flag(${flag})
+# The warning flags given after the target, then the hardening flags.
+function(vendored_c_compile_options target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W3)
+    return()
+  endif()
+  foreach(flag IN LISTS ARGN)
+    vendored_c_try_append_flag(${target} ${flag})
   endforeach()
 
   # _FORTIFY_SOURCE requires that there is some level of optimization,
@@ -114,27 +114,61 @@ else()
     return 0;
   }" C_SUPPORTS_FORTIFY_SOURCE)
   if(C_SUPPORTS_FORTIFY_SOURCE)
-    target_compile_options(pqcrypto PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3)
+    target_compile_options(${target} PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3)
   endif()
   unset(CMAKE_REQUIRED_FLAGS)
 
   # See the notes on -fstack-reuse=none (GCC bug 111843) in the top-level CMakeLists.txt.
-  pqcrypto_try_append_c_flag(-fstack-reuse=none)
-  pqcrypto_try_append_c_flag(-Wstack-protector)
-  pqcrypto_try_append_c_flag(-fstack-protector-all)
-  pqcrypto_try_append_c_flag(-fcf-protection=full)
+  vendored_c_try_append_flag(${target} -fstack-reuse=none)
+  vendored_c_try_append_flag(${target} -Wstack-protector)
+  vendored_c_try_append_flag(${target} -fstack-protector-all)
+  vendored_c_try_append_flag(${target} -fcf-protection=full)
   if(NOT MINGW)
     # stack-clash-protection is a no-op for Windows (GCC bug 90458).
-    pqcrypto_try_append_c_flag(-fstack-clash-protection)
+    vendored_c_try_append_flag(${target} -fstack-clash-protection)
   endif()
   if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-      pqcrypto_try_append_c_flag(-mbranch-protection=bti)
+      vendored_c_try_append_flag(${target} -mbranch-protection=bti)
     else()
-      pqcrypto_try_append_c_flag(-mbranch-protection=standard)
+      vendored_c_try_append_flag(${target} -mbranch-protection=standard)
     endif()
   endif()
-endif()
+endfunction()
+# PQClean's own warning set minus -Wvla: the SLH-DSA sources use the
+# PQCLEAN_VLA macro on purpose, with sizes bounded by compile-time parameters
+# (tree heights, WOTS chain counts, seed lengths), so those six warnings are
+# not actionable; see pqcrypto/slh-dsa-sha2-128s/PQCLEAN.
+vendored_c_compile_options(pqcrypto
+  -Wall -Wextra -Wpedantic -Wshadow -Wmissing-prototypes -Wredundant-decls -Wcast-align -Wpointer-arith -Wundef
+)
+
+#=============================
+# ML-KEM-768 (FIPS 203) for the hybrid v2 transport (XIP-4, HX1): vendored
+# mlkem-native, portable C, built as the one compilation unit
+# crypto/mlkem-native/mlkem768.c with crypto/mlkem-native/xcoin_config.h.
+# The provenance record is crypto/mlkem-native/PINNED; the C++ interface is
+# crypto/mlkem768.h (bitcoin_common).
+#=============================
+add_library(mlkem_native STATIC
+  crypto/mlkem-native/mlkem768.c
+)
+# No include directory is added: some of mlkem-native's header names (params.h,
+# poly.h, symmetric.h) are also pqcrypto/ml-dsa-65's, which is a public include
+# directory of pqcrypto. The sources use quote-includes, and crypto/mlkem768.cpp
+# includes the public header by full path.
+# The randombytes and zeroize hooks are in pqrandom.cpp (bitcoin_util).
+target_link_libraries(mlkem_native
+  PRIVATE
+    sanitize_interface
+    bitcoin_util
+)
+# mlkem-native's own warning set (test/mk/config.mk) plus the ones PQClean's
+# adds (-Wcast-align, -Wundef) and -Wvla.
+vendored_c_compile_options(mlkem_native
+  -Wall -Wextra -Wpedantic -Wshadow -Wmissing-prototypes -Wredundant-decls -Wcast-align -Wpointer-arith -Wundef
+  -Wvla -Wconversion -Wsign-conversion
+)
 
 # Set top-level target output locations.
 if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
@@ -237,6 +271,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   common/url.cpp
   compressor.cpp
   core_io.cpp
+  crypto/mlkem768.cpp
   deploymentinfo.cpp
   external_signer.cpp
   init/common.cpp
@@ -273,6 +308,7 @@ target_link_libraries(bitcoin_common
     bitcoin_consensus
     bitcoin_util
     univalue
+    mlkem_native
     pqcrypto
     secp256k1
     Boost::headers

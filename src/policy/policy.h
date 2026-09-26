@@ -99,7 +99,7 @@ static constexpr unsigned int DUST_RELAY_TX_FEE{3000};
  *  1,000 sat/kvB, 1 sat/vB: Bitcoin parity (founder decision 2026-09-15). xCoin transactions are
  *  about ten times the size of Bitcoin's (an ML-DSA-65 witness carries a 1,952-byte key and a
  *  3,310-byte signature), so the floor fee for a typical 1-in-2-out payment, 1,480 vB as
- *  decoderawtransaction reports it on regtest, is 1,480 sat, 0.0000148 XCF. The floor is a
+ *  decoderawtransaction reports it on regtest, is 1,480 sat, 0.0000148 XID. The floor is a
  *  policy default, not consensus: a release can move it as the price moves, and -minrelaytxfee
  *  overrides it on any node. DEFAULT_BLOCK_MIN_TX_FEE and DEFAULT_INCREMENTAL_RELAY_FEE follow
  *  it, and the wallet's DEFAULT_FALLBACK_FEE (wallet/wallet.h) is the same rate. */

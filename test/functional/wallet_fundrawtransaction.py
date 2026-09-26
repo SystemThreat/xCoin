@@ -871,7 +871,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         node.fundrawtransaction(rawtx, feeRate=0.00000999, add_inputs=True)
 
         self.log.info("- raises RPC error if both feeRate and fee_rate are passed")
-        assert_raises_rpc_error(-8, "Cannot specify both fee_rate (sat/vB) and feeRate (BTC/kvB)",
+        assert_raises_rpc_error(-8, "Cannot specify both fee_rate (sat/vB) and feeRate (XID/kvB)",
             node.fundrawtransaction, rawtx, fee_rate=0.1, feeRate=0.1, add_inputs=True)
 
         self.log.info("- raises RPC error if both feeRate and estimate_mode passed")
@@ -1012,7 +1012,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         outputs = {}
         rawtx = recipient.createrawtransaction([], {wallet.getnewaddress(): 9.79899260})
 
-        # Make 100 0.1 XCF outputs. The amount that we target for funding is in
+        # Make 100 0.1 XID outputs. The amount that we target for funding is in
         # the BnB range when these outputs are used.  However if these outputs
         # are selected, the transaction will end up being too large, so it
         # shouldn't use BnB and instead fall back to Knapsack but that behavior

@@ -17,6 +17,11 @@ P2P port.
    unattended upgrades, key-only sshd, the `xcoin` system user, the build
    (`nexd`, `nex-cli`), `/etc/xcoin/testneta.conf`, the hardened
    `xcoin-testneta.service`, and a check that block 0 is testnet A's genesis.
+   Both scripts refuse, before anything is shipped or changed, a commit whose
+   `TESTNET_GENESIS_IS_FINAL` is false (testnet A not yet re-mined; TESTNET-A.md
+   section 1), and `bootstrap.sh` refuses a genesis other than the one pinned in it.
+   If the started node reports another genesis, `bootstrap.sh` stops and disables the
+   unit and exits non-zero.
 3. On the VPS afterwards: `rcli getconnectioncount`, `rcli getpeerinfo`,
    `journalctl -u xcoin-testneta -f`. Configuration lives in
    `/etc/xcoin/testneta.conf`; data in `/var/lib/xcoin/testneta`.

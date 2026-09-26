@@ -11,7 +11,7 @@ fee are chain truth.
 What it shows:
   - blocks, transactions, witness v3 addresses (OP_3 <32-byte Merkle root>, the
     only spendable output type), the rich list, top miners and the pool's rigs
-  - the block subsidy at the tip, read from the chain (14 XCF in era 0)
+  - the block subsidy at the tip, read from the chain (the schedule is never hardcoded)
   - the fee of every non-coinbase transaction, exact, from the explorer's own
     UTXO set. The settlement levy is 0 bp on every chain (LEVY_BP below), so
     nothing about a levy renders unless XCOIN_LEVY_BP names a rate for a test chain
@@ -39,7 +39,7 @@ Config (env):
   XCOIN_RPC_USER/PASSWORD fallback for local runs only
   XCOIN_EXPLORER_PORT   default 3101 (3001, 3333, 9333 and 9432 are reserved and refused)
   XCOIN_ADDRESS_HRP     override the address prefix (normally taken from the node)
-  XCOIN_MAX_SUPPLY      default 21000000
+  XCOIN_MAX_SUPPLY      default 100000000 (the cap, in XID)
   XCOIN_LEVY_BP         settlement levy in basis points, default 0 (the chain's rule);
                         a non-zero value is for a test chain only
   XCOIN_EXPLORER_URL    canonical/og base URL, default http://localhost:<port>
@@ -89,7 +89,7 @@ CFG = {
     # as a fallback for local runs.
     "rpc_cookie": os.environ.get("XCOIN_RPC_COOKIE", ""),
     "port": int(os.environ.get("XCOIN_EXPLORER_PORT", "3101")),
-    "max_supply": float(os.environ.get("XCOIN_MAX_SUPPLY", "21000000")),
+    "max_supply": float(os.environ.get("XCOIN_MAX_SUPPLY", "100000000")),
     "hrp": os.environ.get("XCOIN_ADDRESS_HRP", CHAIN_PROFILES[_chain]["hrp"]),
 }
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -136,9 +136,12 @@ def web_pool_stats():
         _web_pool_cache["data"] = data
     return data
 
-DESC = ("SuperKnet — the post-quantum xCoin (XCF) block explorer. "
+DESC = ("SuperKnet — the post-quantum xCoin (XID) block explorer. "
         "Live blocks, transactions, witness v3 addresses, the rich list and top miners. "
-        "21,000,000 XCF cap, ML-DSA-65 and SLH-DSA leaves, MetalDAG proof of work.")
+        "100,000,000 XID cap, ML-DSA-65 and SLH-DSA leaves, MetalDAG proof of work.")
+# FINAL emission shape (owner decision 2026-09-25): the Annual Tenth, charter section 4. [EMISSION-SHAPE]
+# The one place the explorer states it.
+EMISSION_NOTE = "The Annual Tenth · 50 XID after the ramp · 10% less every 110,000 blocks · 1.5 XID floor · 0.1 XID tail"
 STATIC = {"favicon-16.png":"image/png","favicon-32.png":"image/png","favicon-48.png":"image/png",
           "favicon.ico":"image/x-icon","favicon.svg":"image/svg+xml",
           "apple-touch-icon.png":"image/png","xcoin.svg":"image/svg+xml",
@@ -162,11 +165,27 @@ def rpc(method, params=None):
     req.add_header("Content-Type","application/json")
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
-            d = json.loads(r.read())
+            # Amounts arrive in XID as JSON numbers. A float holds them exactly only
+            # below 2^26 XID (67,108,864; above it one float step is more than a sat),
+            # so parse them as Decimal, as wallet/wallet_cli.py does.
+            d = json.loads(r.read(), parse_float=Decimal)
             if d.get("error"): return None
             return d.get("result")
     except Exception:
         return None
+
+
+def _json_default(o):
+    """json.dumps hook for the public JSON API: rpc() hands back Decimal amounts, and
+    the API keeps emitting them as plain JSON numbers, as it always has."""
+    if isinstance(o, Decimal):
+        return float(o)
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
+def jdump(obj):
+    """json.dumps for API responses that may carry Decimal values from rpc()."""
+    return json.dumps(obj, default=_json_default)
 
 # ── witness v3: hashing, addresses, single-leaf programs, the settlement levy ─
 # REGENESIS.md sections 3, 4 and 6; src/script/xcoin_v3.h; the same arithmetic as
@@ -323,11 +342,18 @@ def settlement_levy(out_sats, bp=None):
     return whole * bp + (rest * bp + LEVY_DENOMINATOR - 1) // LEVY_DENOMINATOR
 
 def to_sats(v):
-    """XCF (as the RPC prints it) to whole satoshis, without float drift."""
+    """XID (as the RPC prints it) to whole satoshis. Exact for the Decimal values rpc()
+    returns and for strings and ints; a float is exact only below 2^26 XID."""
     return int((Decimal(str(v)) * SAT).to_integral_value())
 
 def sats_xat(s):
-    return f"{s / SAT:,.8f}".rstrip("0").rstrip(".") if s else "0"
+    """Whole satoshis as XID, in integer arithmetic: exact up to the 10^16-sat cap.
+    (A float in XID units is exact only below 2^26 XID, 67,108,864: from there one
+    float step is more than a sat. A float holding sats is exact to 2^53 sat.)"""
+    if not s: return "0"
+    s = int(s)
+    sign, s = ("-", -s) if s < 0 else ("", s)
+    return (sign + f"{s // SAT:,}.{s % SAT:08d}").rstrip("0").rstrip(".")
 
 # ── self-built indexes (txid→block, address→txs, balances, series, miners) ────
 # The scan walks every block from 0, so it also owns the UTXO set: that gives the
@@ -424,8 +450,10 @@ def block_fees(b):
 
 def esc(s): return html.escape(str(s))
 def xat(v):
-    try: return f"{float(v):,.8f}".rstrip("0").rstrip(".")
-    except: return str(v)
+    """An XID amount (Decimal from rpc(), int, str or float) formatted like sats_xat,
+    through whole satoshis, so totals and balances past 2^26 XID keep their last sat."""
+    try: return sats_xat(to_sats(v))
+    except Exception: return str(v)
 def short(s, n=16): s=str(s); return s if len(s)<=2*n else f"{s[:n]}…{s[-8:]}"
 
 # ── HTML shell (acid-lime brutalist — the MineDifferent / xcoinminer.com system) ──
@@ -572,7 +600,7 @@ def footer():
             '<nav class="footer-nav" aria-label="xCoin ecosystem footer"><a href="https://xcoinproject.com/">Overview</a>'
             '<a href="https://xcoinminer.com/">Mine</a><a href="https://superknet.com/" aria-current="page">Explorer</a>'
             '<a href="https://minedifferent.com/">Community</a><a href="https://movepunk.com/" target="xat_move">Movement</a><a href="https://xcoinproject.com/docs">Docs</a></nav></div>'
-            f'<p class="ecosystem-meta">xCoin (XCF) · {esc(CFG["chain_label"])}<br>Built by <a href="https://distributedledgertechnologies.com/" target="xat_dlt">Distributed Ledger Technologies</a></p></div>'
+            f'<p class="ecosystem-meta">xCoin (XID) · {esc(CFG["chain_label"])}<br>Built by <a href="https://distributedledgertechnologies.com/" target="xat_dlt">Distributed Ledger Technologies</a></p></div>'
             '<div class="shell local-footer"><span>SuperKnet · xCoin Explorer · every number is from the chain</span>'
             '<span><a href="https://distributedledgertechnologies.com" target="_blank" rel="noopener">DLT ↗</a></span></div></footer>')
 
@@ -605,12 +633,12 @@ def page(title, body, path="/", script=""):
 <meta property="og:title" content="{esc(title)}">
 <meta property="og:description" content="{esc(DESC)}">
 <meta property="og:url" content="{url}">
-<meta property="og:image" content="{SITE_URL}/og-image.png?v=3">
+<meta property="og:image" content="{SITE_URL}/og-image.png?v=4">
 <meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{esc(title)}">
 <meta name="twitter:description" content="{esc(DESC)}">
-<meta name="twitter:image" content="{SITE_URL}/og-image.png?v=3">
+<meta name="twitter:image" content="{SITE_URL}/og-image.png?v=4">
 <script type="application/ld+json">{{"@context":"https://schema.org","@type":"WebSite","name":"SuperKnet","url":"{SITE_URL}/","description":"{esc(DESC)}"}}</script>
 <style>{CSS}</style></head><body>
 <header class="topbar">
@@ -702,14 +730,14 @@ def charter():
     return _CHARTER["d"] or {}
 
 def tip_subsidy(tip):
-    """The block subsidy at the tip, read from the chain itself (`getblockstats`; 14 XCF
-    in era 0, halving every 750,000 blocks). Falls back to the coinbase value if
+    """The block subsidy at the tip, read from the chain itself (`getblockstats`), so the
+    explorer never hardcodes the schedule. Falls back to the coinbase value if
     getblockstats is unavailable."""
     st = rpc("getblockstats", [tip, ["subsidy"]]) or {}
-    if "subsidy" in st: return st["subsidy"] / SAT
+    if "subsidy" in st: return Decimal(int(st["subsidy"])) / SAT
     bh = rpc("getblockhash", [tip]); b = rpc("getblock", [bh, 2]) if bh else None
-    try: return sum(o["value"] for o in b["tx"][0]["vout"])
-    except Exception: return 0.0
+    try: return sum(Decimal(str(o["value"])) for o in b["tx"][0]["vout"])
+    except Exception: return Decimal(0)
 
 def charter_panel():
     """The network panel: chain identity, the charter commitment and the consensus rules.
@@ -734,7 +762,7 @@ def charter_panel():
             + row("Genesis is final", final_pill,
                   "" if final else "provisional: do not attest or timestamp this currency id")
             + row("Proof of work", "MetalDAG", "300 s target spacing · coinbase maturity 1,000 blocks")
-            + row("Block subsidy", "read from the chain at the tip", "14 XCF in era 0 · halving every 750,000 blocks · 21,000,000 XCF cap")
+            + row("Block subsidy", "read from the chain at the tip", EMISSION_NOTE + f" · {CFG['max_supply']:,.0f} XID cap")
             + levy_row
             + row("Output rule", "witness v3 only", "OP_3 <32-byte Merkle root> or OP_RETURN; no witness v2 anywhere"))
     return f"""
@@ -873,10 +901,10 @@ def view_overview():
   {summary_card("Height", f"{tip:,}", "blocks on chain", sid="height")}
   {summary_card("Network hashrate", f"{hr_v} {hr_u}", "estimate from recent blocks", sid="hashrate")}
   {summary_card("Difficulty", diff_txt, "retargets every block", sid="difficulty")}
-  {summary_card("Supply", f"{supply:,.0f}", "of 21,000,000 XCF", sid="supply")}
+  {summary_card("Supply", f"{supply:,.0f}", f"of {CFG['max_supply']:,.0f} XID", sid="supply")}
 </section>
 <section class="summary-grid section">
-  {summary_card("Block reward", f"{subsidy:,.8f}".rstrip("0").rstrip("."), "XCF · era subsidy at the tip, from the chain")}
+  {summary_card("Block reward", f"{subsidy:,.8f}".rstrip("0").rstrip("."), "XID · era subsidy at the tip, from the chain")}
   {summary_card("Avg block", f"{spacing}s", "last 12 · target 300s")}
   {summary_card("Mempool", f"{mp.get('size',0):,}", "pending transactions", sid="mempool")}
   {summary_card("Mined", f"{pct:.3f}%", "of the cap · no premine")}
@@ -968,7 +996,7 @@ def _rigs():
 
 _BAL_CACHE = {}   # address -> (ts, amount)
 def _balances(addrs, ttl=30):
-    """XCF balance per distinct address (scantxoutset on its scriptPubKey), cached `ttl` seconds."""
+    """XID balance per distinct address (scantxoutset on its scriptPubKey), cached `ttl` seconds."""
     out, now = {}, time.time()
     for a in {x for x in addrs if x}:
         c = _BAL_CACHE.get(a)
@@ -1043,10 +1071,10 @@ def view_mempool():
             t = rpc("getrawtransaction", [txid, True])
             levy = settlement_levy(sum(to_sats(o["value"]) for o in t["vout"])) if t else None
             levy_cell = '<td class="num">' + ('<span class="muted">—</span>' if levy is None else
-                        f'{sats_xat(levy)} XCF' + (' <span class="pill">below levy</span>' if fee_sats < levy else '')) + '</td>'
+                        f'{sats_xat(levy)} XID' + (' <span class="pill">below levy</span>' if fee_sats < levy else '')) + '</td>'
         rows += (f'<tr><td><a class="hash" href="/tx/{txid}">{short(txid,18)}</a></td>'
                  f'<td class="num">{e.get("vsize","?")} vB</td>'
-                 f'<td class="num">{sats_xat(fee_sats)} XCF</td>{levy_cell}</tr>')
+                 f'<td class="num">{sats_xat(fee_sats)} XID</td>{levy_cell}</tr>')
     meta = f"showing {min(len(ids),50):,} of {len(ids):,}" + (f" · levy = {LEVY_BP} bp of the outputs" if with_levy else "")
     levy_head = '<th class="num">Levy required</th>' if with_levy else ""
     body = f"""
@@ -1099,17 +1127,17 @@ def view_block(key):
                        else '<span class="muted">not resolved</span>')
         else:
             short_pay = LEVY_BP > 0 and m["fee"] < m["levy"]
-            feecell = (f'{sats_xat(m["fee"])} XCF'
+            feecell = (f'{sats_xat(m["fee"])} XID'
                        + (' <span class="pill">below levy</span>' if short_pay else ''))
         pills = ("<span class=pill>coinbase</span>" if cb else "") + (" <span class=pill>witness v3</span>" if v3 else "")
         txrows += (f'<tr><td><a class="hash" href="/tx/{t["txid"]}">{short(t["txid"],14)}</a></td>'
                    f'<td class="num">{len(t["vin"])}</td><td class="num">{len(t["vout"])}</td>'
-                   f'<td class="num">{xat(out)} XCF</td><td class="num">{feecell}</td><td>{pills}</td></tr>')
+                   f'<td class="num">{xat(out)} XID</td><td class="num">{feecell}</td><td>{pills}</td></tr>')
     with IDX_LOCK:
         blk_fee, blk_levy, blk_known = block_fees(b)
-    fees_paid = (sats_xat(blk_fee) + " XCF paid") if blk_known else "not fully indexed"
+    fees_paid = (sats_xat(blk_fee) + " XID paid") if blk_known else "not fully indexed"
     if LEVY_BP > 0:
-        fee_row = (f'<tr><th>Fees / levy</th><td>{fees_paid} <span class="muted">· {sats_xat(blk_levy)} XCF '
+        fee_row = (f'<tr><th>Fees / levy</th><td>{fees_paid} <span class="muted">· {sats_xat(blk_levy)} XID '
                    f'required by the {LEVY_BP} bp settlement levy</span></td></tr>')
     else:
         fee_row = f'<tr><th>Fees</th><td>{fees_paid}</td></tr>'
@@ -1226,7 +1254,7 @@ def view_tx(txid):
                         + ("· annex" if w["annex"] else "") + "</div>")
             inrows += (f'<tr><td><a class="hash" href="/tx/{esc(vin.get("txid",""))}">{short(vin.get("txid",""),12)}</a>'
                        f':{esc(vin.get("vout",""))}</td><td>{who}</td>'
-                       f'<td class="num">{(sats_xat(sats) + " XCF") if sats is not None else "—"}</td></tr>')
+                       f'<td class="num">{(sats_xat(sats) + " XID") if sats is not None else "—"}</td></tr>')
         if len(t["vin"]) > 200: in_known = False
     # ── outputs ─────────────────────────────────────────────────────────────
     outrows = ""
@@ -1251,8 +1279,7 @@ def view_tx(txid):
         pills = ""
         if v3: pills += ' <span class="pill">witness v3</span>'
         if v2: pills += ' <span class="pill ghost">witness v2 · not spendable here</span>'
-        outrows += f'<tr><td>{tgt}{pills}</td><td class="num">{sats_xat(sats)} XCF</td></tr>'
-    total = out_sats / SAT
+        outrows += f'<tr><td>{tgt}{pills}</td><td class="num">{sats_xat(sats)} XID</td></tr>'
     # ── the fee, and the settlement levy when a test chain has one (LEVY_BP > 0) ──
     with_levy = LEVY_BP > 0 and not cb
     levy = settlement_levy(out_sats) if with_levy else 0
@@ -1268,21 +1295,21 @@ def view_tx(txid):
             feecell = '<span class="muted">not resolvable from this node</span>'
             fee_meta = "fee not resolved"
         else:
-            feecell = f'<strong>{sats_xat(fee)} XCF</strong>'
-            fee_meta = f"fee {sats_xat(fee)} XCF"
+            feecell = f'<strong>{sats_xat(fee)} XID</strong>'
+            fee_meta = f"fee {sats_xat(fee)} XID"
             if with_levy:
                 if fee < levy:
                     verdict = ' <span class="pill">below the levy</span>'
                 else:
                     over = fee - levy
                     verdict = (' <span class="pill">levy met</span>'
-                               + (f' <span class="muted">· {sats_xat(over)} XCF above it</span>' if over else ''))
+                               + (f' <span class="muted">· {sats_xat(over)} XID above it</span>' if over else ''))
         fee_rows = f'<tr><th>Fee paid</th><td>{feecell}{verdict}</td></tr>'
         if with_levy:
-            fee_rows += (f'<tr><th>Levy required</th><td>{sats_xat(levy)} XCF '
+            fee_rows += (f'<tr><th>Levy required</th><td>{sats_xat(levy)} XID '
                          f'<span class="muted">· ceil({LEVY_BP} × {out_sats:,} / {LEVY_DENOMINATOR:,}) sat, '
                          f'{LEVY_BP} bp of the outputs</span></td></tr>')
-            fee_meta = f"levy {sats_xat(levy)} XCF"
+            fee_meta = f"levy {sats_xat(levy)} XID"
     body = f"""
 <section class="note-panel head-panel section">
   <p class="eyebrow">Transaction</p>
@@ -1290,13 +1317,13 @@ def view_tx(txid):
   <p class="hash">{'in block <a href="/block/' + bh + '">' + short(bh,14) + '</a>' if bh else 'mempool / unindexed'}{' · <span class=pill>coinbase</span>' if cb else ''}{f' · <span class=pill>{v3_outs} witness v3 outputs</span>' if v3_outs else ''}</p>
 </section>
 <section class="workspace section">
-  <div class="workspace-head"><span>Details</span><span class="meta">{xat(total)} XCF out · {fee_meta}</span></div>
+  <div class="workspace-head"><span>Details</span><span class="meta">{sats_xat(out_sats)} XID out · {fee_meta}</span></div>
   <div class="table-wrap"><table class="kv"><tbody>
     <tr><th>TXID</th><td>{esc(t['txid'])}</td></tr>
     <tr><th>Block</th><td>{('<a href="/block/'+bh+'">'+esc(bh)+'</a>') if bh else '<span class=muted>mempool / unindexed</span>'}</td></tr>
     <tr><th>Size / vsize</th><td>{t.get('size',0):,} B / {t.get('vsize',0):,} vB</td></tr>
-    <tr><th>Total in</th><td>{(sats_xat(in_sats) + ' XCF') if (in_known and not cb) else '<span class=muted>—</span>'}</td></tr>
-    <tr><th>Total out</th><td><strong>{sats_xat(out_sats)} XCF</strong></td></tr>
+    <tr><th>Total in</th><td>{(sats_xat(in_sats) + ' XID') if (in_known and not cb) else '<span class=muted>—</span>'}</td></tr>
+    <tr><th>Total out</th><td><strong>{sats_xat(out_sats)} XID</strong></td></tr>
     {fee_rows}
   </tbody></table></div>
 </section>
@@ -1386,7 +1413,7 @@ def view_address(addr, came_from=None):
     for u in sorted(utxos, key=lambda x:-x.get("height",0))[:200]:
         rows += (f'<tr><td><a class="hash" href="/tx/{u["txid"]}">{short(u["txid"],14)}</a>:{u["vout"]}</td>'
                  f'<td class="num"><a href="/block/{u.get("height","")}">{u.get("height","")}</a></td>'
-                 f'<td class="num">{xat(u["amount"])} XCF</td></tr>')
+                 f'<td class="num">{xat(u["amount"])} XID</td></tr>')
     hrows = ""
     for e in hist[:120]:
         age = int(time.time()) - e["time"]
@@ -1402,10 +1429,10 @@ def view_address(addr, came_from=None):
 <section class="note-panel head-panel section">
   <p class="eyebrow">Address</p>
   <h1 class="h-small">{a}</h1>
-  <p class="hash">{badge} ML-DSA-65 · {xat(bal)} XCF</p>
+  <p class="hash">{badge} ML-DSA-65 · {xat(bal)} XID</p>
 </section>
 <section class="summary-grid section">
-  {summary_card("Balance", f"{xat(bal)}", "XCF")}
+  {summary_card("Balance", f"{xat(bal)}", "XID")}
   {summary_card("Unspent outputs", f"{len(utxos):,}", "coins here now")}
   {summary_card("Received in", f"{len(hist):,}", "transactions indexed")}
   {summary_card("Blocks mined", f"{mined:,}", "coinbase credits on chain")}
@@ -1446,14 +1473,14 @@ def view_richlist():
     for i, (addr, sats) in enumerate(rows_src, 1):
         trs += (f'<tr{" class=top-ten" if i <= 3 else ""}><td><span class="rank-badge">{i}</span></td>'
                 f'<td><a class="hash" href="/address/{esc(addr)}">{short(addr, 20)}</a></td>'
-                f'<td class="num">{sats_xat(sats)} XCF</td>'
+                f'<td class="num">{sats_xat(sats)} XID</td>'
                 f'<td class="num muted">{(sats / total * 100) if total else 0:.3f}%</td></tr>')
     trs = trs or '<tr><td colspan=4 class=muted>no balances indexed yet</td></tr>'
     body = f"""
 <section class="note-panel head-panel section">
   <p class="eyebrow">Rich list</p>
   <h1 class="h-small">{holders:,} addresses hold coins</h1>
-  <p class="hash">{sats_xat(total)} XCF in the UTXO set · every address is a witness v3 address ({esc(CFG["hrp"])}1r…)</p>
+  <p class="hash">{sats_xat(total)} XID in the UTXO set · every address is a witness v3 address ({esc(CFG["hrp"])}1r…)</p>
 </section>
 <section class="workspace section">
   <div class="workspace-head"><span>Top {min(len(rows_src), 250):,} balances</span><span class="meta">counted by this explorer's own scan of every block</span></div>
@@ -1506,12 +1533,12 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path); p = unquote(u.path)
         try:
             if p == "/" : return self._send(view_overview())
-            if p == "/api/stats": return self._send(json.dumps(api_stats()), ctype="application/json")
-            if p == "/api/network": return self._send(json.dumps(api_network()), ctype="application/json")
+            if p == "/api/stats": return self._send(jdump(api_stats()), ctype="application/json")
+            if p == "/api/network": return self._send(jdump(api_network()), ctype="application/json")
             if p.startswith("/api/block/"):
                 b = api_block(p[len("/api/block/"):])
                 if b is None: return self._send(json.dumps({"error": "unknown block"}), ctype="application/json", code=404)
-                return self._send(json.dumps(b), ctype="application/json")
+                return self._send(jdump(b), ctype="application/json")
             if p == "/mempool": return self._send(view_mempool())
             if p == "/xat-sw.js":
                 with open(os.path.join(HERE,"web/xat-sw.js"),"rb") as f: return self._send(f.read(),ctype="application/javascript")
@@ -1531,7 +1558,7 @@ class H(BaseHTTPRequestHandler):
             if p.startswith("/block/"): return self._send(view_block(p[7:]))
             if p.startswith("/tx/"): return self._send(view_tx(p[4:]))
             if p == "/richlist": return self._send(view_richlist())
-            if p == "/api/charter": return self._send(json.dumps(charter()), ctype="application/json")
+            if p == "/api/charter": return self._send(jdump(charter()), ctype="application/json")
             if p.startswith("/address/"):
                 came = parse_qs(u.query).get("from", [""])[0]
                 return self._send(view_address(p[9:], came_from=came))

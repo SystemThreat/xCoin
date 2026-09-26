@@ -28,7 +28,8 @@ POOL.log.setLevel(logging.CRITICAL)   # the refusal path logs a warning by desig
 REPO = Path(__file__).resolve().parent.parent
 
 COIN = 100_000_000
-REHEARSAL_SUBSIDY = 14 * COIN          # the rehearsal chain's era-0 rate
+MAX_MONEY = 100_000_000 * COIN         # src/consensus/amount.h: the 100,000,000 XID cap, 10^16 sat (test_the_cap_mirrors_consensus)
+STUB_COINBASE_VALUE = 14 * COIN        # a stub template value, not any chain's subsidy (the pool never assumes one)
 WITNESS_COMMITMENT = "6a24aa21a9ed" + "7c" * 32   # BIP-141 shape, 38 bytes
 
 # A pinned key hash and its addresses on each chain (the same key, three prefixes).
@@ -183,9 +184,9 @@ class CoinbaseTests(unittest.TestCase):
 
     def test_pays_op3_root_to_the_v3_worker(self):
         spk = POOL.payout_script(MINER_V3_REHEARSAL)
-        outputs = parse_outputs(build(2, REHEARSAL_SUBSIDY, spk))
+        outputs = parse_outputs(build(2, STUB_COINBASE_VALUE, spk))
         self.assertEqual(outputs, [
-            (REHEARSAL_SUBSIDY, bytes.fromhex(MINER_V3_SCRIPT)),
+            (STUB_COINBASE_VALUE, bytes.fromhex(MINER_V3_SCRIPT)),
             (0, bytes.fromhex(WITNESS_COMMITMENT)),
         ])
         payout_script = outputs[0][1]
@@ -196,9 +197,9 @@ class CoinbaseTests(unittest.TestCase):
     def test_height_1_is_an_ordinary_block(self):
         """Block 1 pays the miner like any other block: nothing is carried in."""
         POOL.CFG["hrp"] = "txa"
-        outputs = parse_outputs(build(1, REHEARSAL_SUBSIDY, POOL.payout_script(MINER_V3_REHEARSAL)))
+        outputs = parse_outputs(build(1, STUB_COINBASE_VALUE, POOL.payout_script(MINER_V3_REHEARSAL)))
         self.assertEqual(len(outputs), 2)
-        self.assertEqual(outputs[0], (REHEARSAL_SUBSIDY, bytes.fromhex(MINER_V3_SCRIPT)))
+        self.assertEqual(outputs[0], (STUB_COINBASE_VALUE, bytes.fromhex(MINER_V3_SCRIPT)))
         self.assertEqual(outputs[1][1].hex(), WITNESS_COMMITMENT)
 
     def test_pays_the_founder_address(self):
@@ -211,7 +212,7 @@ class CoinbaseTests(unittest.TestCase):
         """coinbasevalue = subsidy + fees (which include every levy the block
         collected); the pool pays all of it, it keeps nothing."""
         spk = POOL.payout_script(MINER_V3_REHEARSAL)
-        value = REHEARSAL_SUBSIDY + 123_456
+        value = STUB_COINBASE_VALUE + 123_456
         outputs = parse_outputs(build(2, value, spk))
         self.assertEqual(sum(amount for amount, _ in outputs), value)
 
@@ -220,14 +221,14 @@ class CoinbaseTests(unittest.TestCase):
         for hrp in ("txa", "xpa"):
             POOL.CFG["hrp"] = hrp
             with self.assertRaises(ValueError) as caught:
-                build(2, REHEARSAL_SUBSIDY, v2_spk)
+                build(2, STUB_COINBASE_VALUE, v2_spk)
             self.assertIn("bad-txout-not-pq", str(caught.exception))
 
     def test_a_bare_program_is_refused(self):
         """The pre-v3 caller passed a bare 32-byte key hash; that must not
         silently become a malformed script."""
         with self.assertRaises(ValueError):
-            build(2, REHEARSAL_SUBSIDY, bytes.fromhex(FOUNDER_KEY_HASH))
+            build(2, STUB_COINBASE_VALUE, bytes.fromhex(FOUNDER_KEY_HASH))
 
     def test_regtest_v2_payout_is_allowed(self):
         POOL.CFG["hrp"] = POOL.REGTEST_HRP
@@ -237,8 +238,8 @@ class CoinbaseTests(unittest.TestCase):
 
     def test_coinbase_without_witness_commitment(self):
         spk = POOL.payout_script(MINER_V3_REHEARSAL)
-        outputs = parse_outputs(build(2, REHEARSAL_SUBSIDY, spk, wc=None))
-        self.assertEqual(outputs, [(REHEARSAL_SUBSIDY, bytes.fromhex(MINER_V3_SCRIPT))])
+        outputs = parse_outputs(build(2, STUB_COINBASE_VALUE, spk, wc=None))
+        self.assertEqual(outputs, [(STUB_COINBASE_VALUE, bytes.fromhex(MINER_V3_SCRIPT))])
 
     def test_future_epoch_is_rejected_before_pow_rpc(self):
         session = POOL.Session.__new__(POOL.Session)
@@ -270,7 +271,7 @@ class ScriptSigAndDataCarrierTests(unittest.TestCase):
                        1_000_000, 16_777_215, 16_777_216, 2_000_000_000):
             for en_size in (4, 8, 12, 16):
                 with self.subTest(height=height, extranonce=en_size):
-                    tx = build(height, REHEARSAL_SUBSIDY, self.spk, en_size=en_size)
+                    tx = build(height, STUB_COINBASE_VALUE, self.spk, en_size=en_size)
                     script_sig, _ = parse_coinbase(tx)
                     self.assertLessEqual(len(script_sig), POOL.MAX_COINBASE_SCRIPTSIG)
                     self.assertGreaterEqual(len(script_sig), POOL.MIN_COINBASE_SCRIPTSIG)
@@ -281,11 +282,11 @@ class ScriptSigAndDataCarrierTests(unittest.TestCase):
 
     def test_an_oversized_extranonce_is_refused_not_mined(self):
         with self.assertRaises(ValueError) as caught:
-            build(2, REHEARSAL_SUBSIDY, self.spk, en_size=120)
+            build(2, STUB_COINBASE_VALUE, self.spk, en_size=120)
         self.assertIn("bad-cb-length", str(caught.exception))
 
     def test_the_only_op_return_is_the_witness_commitment(self):
-        outputs = parse_outputs(build(2, REHEARSAL_SUBSIDY, self.spk))
+        outputs = parse_outputs(build(2, STUB_COINBASE_VALUE, self.spk))
         data = [script for _, script in outputs if script[:1] == b"\x6a"]
         self.assertEqual(data, [bytes.fromhex(WITNESS_COMMITMENT)])
         self.assertLessEqual(len(data[0]), POOL.MAX_OP_RETURN_RELAY)
@@ -293,7 +294,7 @@ class ScriptSigAndDataCarrierTests(unittest.TestCase):
 
     def test_an_oversized_witness_commitment_is_refused(self):
         with self.assertRaises(ValueError):
-            build(2, REHEARSAL_SUBSIDY, self.spk, wc="6a" + "00" * 100)
+            build(2, STUB_COINBASE_VALUE, self.spk, wc="6a" + "00" * 100)
 
 
 class FakeWriter:
@@ -340,7 +341,7 @@ class StratumAuthorizeTests(unittest.TestCase):
 
     def test_a_v3_worker_is_authorized_and_gets_an_op3_job(self):
         session, sent = self.authorize(MINER_V3_REHEARSAL + ".rig1",
-                                       self.template(2, REHEARSAL_SUBSIDY))
+                                       self.template(2, STUB_COINBASE_VALUE))
         self.assertTrue(sent[0]["result"], sent[0])
         self.assertIsNone(sent[0]["error"])
         self.assertEqual(session.worker, "rig1")
@@ -350,11 +351,11 @@ class StratumAuthorizeTests(unittest.TestCase):
         p1, p2 = notify[0]["params"][2], notify[0]["params"][3]
         cb = bytes.fromhex(p1) + bytes(session.en2_size + len(session.en1)) + bytes.fromhex(p2)
         outputs = parse_outputs(cb)
-        self.assertEqual(outputs[0], (REHEARSAL_SUBSIDY, bytes.fromhex(MINER_V3_SCRIPT)))
+        self.assertEqual(outputs[0], (STUB_COINBASE_VALUE, bytes.fromhex(MINER_V3_SCRIPT)))
 
     def test_a_v2_worker_is_refused(self):
         session, sent = self.authorize(FOUNDER_V2_REHEARSAL + ".rig1",
-                                       self.template(2, REHEARSAL_SUBSIDY))
+                                       self.template(2, STUB_COINBASE_VALUE))
         self.assertFalse(sent[0]["result"])
         self.assertIn("witness v3", sent[0]["error"][1])
         self.assertIsNone(session.spk)
@@ -377,7 +378,7 @@ class JobSnapshotTests(unittest.TestCase):
     @staticmethod
     def template(prev, txs, height=5):
         now = int(time.time())
-        return {"height": height, "coinbasevalue": REHEARSAL_SUBSIDY, "version": 0x20000000,
+        return {"height": height, "coinbasevalue": STUB_COINBASE_VALUE, "version": 0x20000000,
                 "bits": "207fffff", "curtime": now, "mintime": now - 60,
                 "previousblockhash": prev, "transactions": txs,
                 "default_witness_commitment": WITNESS_COMMITMENT}
@@ -462,7 +463,7 @@ class SubmitRateLimitTests(unittest.TestCase):
             calls.append(method)
             if method == "getblocktemplate":
                 now = int(time.time())
-                return {"height": 5, "coinbasevalue": REHEARSAL_SUBSIDY, "version": 0x20000000, "bits": "207fffff",
+                return {"height": 5, "coinbasevalue": STUB_COINBASE_VALUE, "version": 0x20000000, "bits": "207fffff",
                         "curtime": now, "mintime": now - 60, "previousblockhash": "11" * 32, "transactions": [],
                         "default_witness_commitment": WITNESS_COMMITMENT}
             return "ff" * 32   # never a share, never a block
@@ -574,7 +575,7 @@ class CreditedDifficultyTests(unittest.TestCase):
         def rpc(method, params=None):
             if method == "getblocktemplate":
                 now = int(time.time())
-                return {"height": 5, "coinbasevalue": REHEARSAL_SUBSIDY, "version": 0x20000000, "bits": self.EASY_BITS,
+                return {"height": 5, "coinbasevalue": STUB_COINBASE_VALUE, "version": 0x20000000, "bits": self.EASY_BITS,
                         "curtime": now, "mintime": now - 60, "previousblockhash": "11" * 32, "transactions": [],
                         "default_witness_commitment": WITNESS_COMMITMENT}
             if method == "getmetaldagpowhash":
@@ -626,7 +627,7 @@ class WebSessionNamingTests(unittest.TestCase):
         def rpc(method, params=None):
             if method == "getblocktemplate":
                 now = int(time.time())
-                return {"height": 5, "coinbasevalue": REHEARSAL_SUBSIDY, "version": 0x20000000, "bits": "207fffff",
+                return {"height": 5, "coinbasevalue": STUB_COINBASE_VALUE, "version": 0x20000000, "bits": "207fffff",
                         "curtime": now, "mintime": now - 60, "previousblockhash": "11" * 32, "transactions": [],
                         "default_witness_commitment": WITNESS_COMMITMENT}
             return None
@@ -679,7 +680,7 @@ class SubmitInputValidationTests(unittest.TestCase):
             self.calls.append(method)
             if method == "getblocktemplate":
                 now = int(time.time())
-                return {"height": 5, "coinbasevalue": REHEARSAL_SUBSIDY, "version": 0x20000000, "bits": "207fffff",
+                return {"height": 5, "coinbasevalue": STUB_COINBASE_VALUE, "version": 0x20000000, "bits": "207fffff",
                         "curtime": now, "mintime": now - 60, "previousblockhash": "11" * 32, "transactions": [],
                         "default_witness_commitment": WITNESS_COMMITMENT}
             if method == "getmetaldagpowhash":
@@ -889,7 +890,7 @@ class LevyTests(unittest.TestCase):
         # src/consensus/params.h SETTLEMENT_LEVY_GENESIS_RULE: zero rate, zero cap.
         self.assertEqual(POOL.SETTLEMENT_LEVY_BP, 0)
         self.assertEqual(POOL.SETTLEMENT_LEVY_CAP_SAT, 0)
-        for sats in (0, 1, 2_001, 10_000, 50 * COIN, 2_100_000_000_000_000):
+        for sats in (0, 1, 2_001, 10_000, 50 * COIN, MAX_MONEY):
             self.assertEqual(POOL.settlement_levy(sats), 0)
             self.assertEqual(POOL.levy_from_inputs(sats), 0)
         # 1,480 sat: a typical 1,480-vB 1-in-2-out ML-DSA payment at the 1 sat/vB relay floor (src/policy/policy.h)
@@ -906,13 +907,13 @@ class LevyTests(unittest.TestCase):
         self.assertEqual(POOL.settlement_levy(0, bp, cap), 0)
         self.assertEqual(POOL.settlement_levy(10_000, 0, cap), 0)
         # The raw arithmetic before the cap (Consensus::SettlementLevyUncapped).
-        self.assertEqual(POOL.settlement_levy_uncapped(2_100_000_000_000_000, bp), 1_050_000_000_000)
-        self.assertEqual(POOL.settlement_levy_uncapped(2_100_000_000_000_000, 10_000),
-                         2_100_000_000_000_000)
+        # levy.h: SettlementLevyUncapped(MAX_MONEY, SETTLEMENT_LEVY_BP) == 5'000'000'000'000 (50,000 XID)
+        self.assertEqual(POOL.settlement_levy_uncapped(MAX_MONEY, bp), 5_000_000_000_000)
+        self.assertEqual(POOL.settlement_levy_uncapped(MAX_MONEY, 10_000), MAX_MONEY)     # 100% of the cap: no overflow
         self.assertEqual(POOL.levy_from_inputs(10_005, bp, cap), 5)
         self.assertEqual(POOL.settlement_levy(10_005 - 5, bp, cap), 5)
-        # 50 XCF in: 2,498,751 sat would be the uncapped answer; the cap makes it 10,000.
-        self.assertEqual(POOL.levy_from_inputs(50 * COIN, bp, cap_sat=2_100_000_000_000_000), 2_498_751)
+        # 50 XID in: 2,498,751 sat would be the uncapped answer; the cap makes it 10,000.
+        self.assertEqual(POOL.levy_from_inputs(50 * COIN, bp, cap_sat=MAX_MONEY), 2_498_751)
         self.assertEqual(POOL.levy_from_inputs(50 * COIN, bp, cap), cap)
         self.assertLessEqual(POOL.settlement_levy(50 * COIN - 10_000, bp, cap), 10_000)
 
@@ -922,21 +923,29 @@ class LevyTests(unittest.TestCase):
         whenever a test (or a future activation) runs them at that rule."""
         bp, cap = POOL.SETTLEMENT_LEVY_REFERENCE_BP, POOL.SETTLEMENT_LEVY_REFERENCE_CAP_SAT
         self.assertEqual(cap, 10_000)                                          # consensus/params.h
-        self.assertEqual(POOL.settlement_levy(20_000_000, bp, cap), 10_000)     # 0.2 XCF out: exactly at the cap
+        self.assertEqual(POOL.settlement_levy(20_000_000, bp, cap), 10_000)     # 0.2 XID out: exactly at the cap
         self.assertEqual(POOL.settlement_levy(20_000_001, bp, cap), 10_000)     # one sat past the crossover
         self.assertEqual(POOL.settlement_levy(19_999_999, bp, cap), 10_000)     # ceil(9,999.9995) = 10,000
         self.assertEqual(POOL.settlement_levy(19_998_000, bp, cap), 9_999)      # just under the cap
-        self.assertEqual(POOL.settlement_levy(1_000_000_000_000, bp, cap), 10_000)  # 10,000 XCF out owes the cap
-        self.assertEqual(POOL.settlement_levy(2_100_000_000_000_000, bp, cap), 10_000)   # the whole supply
-        self.assertEqual(POOL.levy_from_inputs(2_100_000_000_000_000, bp, cap), 10_000)  # wallet-side helper too
+        self.assertEqual(POOL.settlement_levy(1_000_000_000_000, bp, cap), 10_000)  # 10,000 XID out owes the cap
+        self.assertEqual(POOL.settlement_levy(MAX_MONEY, bp, cap), 10_000)   # the whole supply (levy.h)
+        self.assertEqual(POOL.levy_from_inputs(MAX_MONEY, bp, cap), 10_000)  # wallet-side helper too
         # A raised cap is proportional again above the old crossover (the soft-fork lever).
         self.assertEqual(POOL.settlement_levy(COIN, bp, cap_sat=100_000), 50_000)
-        # The rehearsal miner's whole block reward, swept: never more than the cap.
-        for total in (REHEARSAL_SUBSIDY, 50 * COIN, 76_650 * COIN):
+        # A whole block reward, swept: never more than the cap.
+        for total in (STUB_COINBASE_VALUE, 50 * COIN, 76_650 * COIN, MAX_MONEY):
             self.assertLessEqual(POOL.levy_from_inputs(total, bp, cap), cap)
         # And under the genesis rule the floor is the byte fee alone.
-        self.assertEqual(POOL.payout_fee_floor_sats(2_100_000_000_000_000), 0)
-        self.assertEqual(POOL.payout_fee_floor_sats(2_100_000_000_000_000, 12_345), 12_345)
+        self.assertEqual(POOL.payout_fee_floor_sats(MAX_MONEY), 0)
+        self.assertEqual(POOL.payout_fee_floor_sats(MAX_MONEY, 12_345), 12_345)
+
+    def test_the_cap_mirrors_consensus(self):
+        """MAX_MONEY above is the consensus cap, so the levy mirror tests the real boundary."""
+        amount = (REPO / "src" / "consensus" / "amount.h").read_text()
+        self.assertIn("static constexpr CAmount MAX_MONEY = 100000000 * COIN;", amount)
+        levy = (REPO / "src" / "consensus" / "levy.h").read_text()
+        self.assertIn("SettlementLevyUncapped(MAX_MONEY, SETTLEMENT_LEVY_BP) == 5'000'000'000'000LL", levy)
+        self.assertEqual(MAX_MONEY, 10_000_000_000_000_000)
 
     def test_the_default_rpc_port_is_mainnets(self):
         """src/chainparamsbase.cpp: mainnet RPC is 8332 (the rehearsal chain's is 19432)."""
@@ -948,8 +957,10 @@ class LevyTests(unittest.TestCase):
         self.assertNotRegex(source, r"(?<!\d)9[34]32(?!\d)")        # the old, no-chain defaults
         readme = MODULE_PATH.with_name("README.md").read_text()
         self.assertNotRegex(readme, r"(?<!\d)9[34]32(?!\d)")
-        self.assertIn("XCF", readme.splitlines()[2])
+        self.assertIn("XID", readme.splitlines()[2])
         self.assertNotIn("XAT", readme)
+        self.assertNotIn("XCF", readme)                              # retired 2026-09-25
+        self.assertNotIn("XCF", source)
 
     def test_the_floor_is_never_below_the_levy(self):
         for total in (1, 999, 10_000, 50 * COIN, 76_650 * COIN):
@@ -975,7 +986,7 @@ class LevyTests(unittest.TestCase):
         POOL.CFG["hrp"], saved = "txa", POOL.CFG["hrp"]
         try:
             spk = POOL.payout_script(MINER_V3_REHEARSAL)
-            value = REHEARSAL_SUBSIDY + POOL.settlement_levy(76_650 * COIN)
+            value = STUB_COINBASE_VALUE + POOL.settlement_levy(76_650 * COIN)
             outputs = parse_outputs(build(2, value, spk))
             paid = sum(amount for amount, script in outputs if script[:1] != b"\x6a")
             self.assertEqual(paid, value)      # no pool cut, no rounding loss

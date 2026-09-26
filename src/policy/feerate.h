@@ -16,7 +16,7 @@
 #include <string>
 #include <type_traits>
 
-const std::string CURRENCY_UNIT = "BTC"; // One formatted unit
+const std::string CURRENCY_UNIT = "XID"; // One formatted unit (xCoin's ticker; owner decision 2026-09-25)
 const std::string CURRENCY_ATOM = "sat"; // One indivisible minimum value unit
 
 enum class FeeRateFormat {

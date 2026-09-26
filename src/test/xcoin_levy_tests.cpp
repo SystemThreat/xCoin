@@ -67,9 +67,9 @@ BOOST_AUTO_TEST_CASE(levy_arithmetic)
     BOOST_CHECK_EQUAL(SettlementLevy(10'000, bp), 5);
     BOOST_CHECK_EQUAL(SettlementLevy(2'000, bp), 1);
     BOOST_CHECK_EQUAL(SettlementLevy(20'000, bp), 10);
-    BOOST_CHECK_EQUAL(SettlementLevyUncapped(COIN, bp), 50'000);       // 1 XCF -> 0.0005 XCF proportional...
-    BOOST_CHECK_EQUAL(SettlementLevy(COIN, bp), Consensus::SETTLEMENT_LEVY_CAP_SAT); // ...but consensus caps it at 0.0001 XCF
-    BOOST_CHECK_EQUAL(SettlementLevyUncapped(50 * COIN, bp), 2'500'000); // 50 XCF -> 0.025 XCF proportional
+    BOOST_CHECK_EQUAL(SettlementLevyUncapped(COIN, bp), 50'000);       // 1 XID -> 0.0005 XID proportional...
+    BOOST_CHECK_EQUAL(SettlementLevy(COIN, bp), Consensus::SETTLEMENT_LEVY_CAP_SAT); // ...but consensus caps it at 0.0001 XID
+    BOOST_CHECK_EQUAL(SettlementLevyUncapped(50 * COIN, bp), 2'500'000); // 50 XID -> 0.025 XID proportional
     BOOST_CHECK_EQUAL(SettlementLevy(50 * COIN, bp), Consensus::SETTLEMENT_LEVY_CAP_SAT);
     // Rounding up: one satoshi over a boundary costs a whole extra satoshi.
     BOOST_CHECK_EQUAL(SettlementLevy(1, bp), 1);
@@ -90,12 +90,12 @@ BOOST_AUTO_TEST_CASE(levy_arithmetic)
     BOOST_CHECK_EQUAL(SettlementLevy(10'000, 100), 100);
     // The raw proportional arithmetic, uncapped: unchanged, and still overflow-free.
     BOOST_CHECK_EQUAL(SettlementLevyUncapped(MAX_MONEY, Consensus::SETTLEMENT_LEVY_BP_MAX), MAX_MONEY);
-    BOOST_CHECK_EQUAL(SettlementLevyUncapped(MAX_MONEY, bp), 1'050'000'000'000LL); // 10,500 XCF, uncapped
-    BOOST_CHECK_EQUAL(SettlementLevyUncapped(MAX_MONEY - 1, bp), 1'050'000'000'000LL); // rounds up to the same
-    // What consensus actually charges: the cap, 0.0001 XCF, however much moves.
+    BOOST_CHECK_EQUAL(SettlementLevyUncapped(MAX_MONEY, bp), 5'000'000'000'000LL); // 50,000 XID, uncapped
+    BOOST_CHECK_EQUAL(SettlementLevyUncapped(MAX_MONEY - 1, bp), 5'000'000'000'000LL); // rounds up to the same
+    // What consensus actually charges: the cap, 0.0001 XID, however much moves.
     BOOST_CHECK_EQUAL(SettlementLevy(MAX_MONEY, bp), Consensus::SETTLEMENT_LEVY_CAP_SAT);
     BOOST_CHECK_EQUAL(SettlementLevy(MAX_MONEY - 1, bp), Consensus::SETTLEMENT_LEVY_CAP_SAT);
-    BOOST_CHECK_EQUAL(SettlementLevy(20'000'000, bp), Consensus::SETTLEMENT_LEVY_CAP_SAT); // 0.2 XCF: the crossover
+    BOOST_CHECK_EQUAL(SettlementLevy(20'000'000, bp), Consensus::SETTLEMENT_LEVY_CAP_SAT); // 0.2 XID: the crossover
     BOOST_CHECK_EQUAL(SettlementLevy(19'999'999, bp), 10'000); // one sat below: still exactly the cap value
     BOOST_CHECK_EQUAL(SettlementLevy(19'998'000, bp), 9'999);  // and below that, proportional again
     // Brute-force agreement with the definition on a range that crosses many boundaries.
@@ -173,7 +173,8 @@ BOOST_AUTO_TEST_CASE(levy_chainparams)
         BOOST_CHECK_EQUAL(sched[0].bp, 0);
         BOOST_CHECK_EQUAL(sched[0].capSat, 0);
         BOOST_CHECK_EQUAL(p->GetConsensus().SettlementLevyAt(0).bp, Consensus::SETTLEMENT_LEVY_GENESIS_BP);
-        BOOST_CHECK_EQUAL(p->GetConsensus().SettlementLevyAt(23'250'000).capSat, Consensus::SETTLEMENT_LEVY_GENESIS_CAP_SAT);
+        BOOST_CHECK_EQUAL(p->GetConsensus().SettlementLevyAt(Consensus::EMISSION_END_HEIGHT).capSat, Consensus::SETTLEMENT_LEVY_GENESIS_CAP_SAT);     // the last subsidy block
+        BOOST_CHECK_EQUAL(p->GetConsensus().SettlementLevyAt(Consensus::EMISSION_END_HEIGHT + 1).capSat, Consensus::SETTLEMENT_LEVY_GENESIS_CAP_SAT); // fees only from here
         BOOST_CHECK_EQUAL(Consensus::SettlementLevy(MAX_MONEY, p->GetConsensus().SettlementLevyAt(1)), 0);
     }
     CChainParams::RegTestOptions opts;
@@ -242,8 +243,8 @@ BOOST_AUTO_TEST_CASE(levy_schedule_soft_fork_only)
     BOOST_CHECK_EQUAL(p.SettlementLevyAt(2'000'000).capSat, 100'000);
     BOOST_CHECK_EQUAL(p.SettlementLevyAt(2'999'999).bp, 5);
     BOOST_CHECK_EQUAL(p.SettlementLevyAt(3'000'000).bp, 10);
-    BOOST_CHECK_EQUAL(Consensus::SettlementLevy(COIN, p.SettlementLevyAt(2'000'000)), 50'000);   // 1 XCF under the raised cap: proportional again
-    BOOST_CHECK_EQUAL(Consensus::SettlementLevy(COIN, p.SettlementLevyAt(3'000'000)), 100'000);  // 10 bp of 1 XCF: the raised cap binds
+    BOOST_CHECK_EQUAL(Consensus::SettlementLevy(COIN, p.SettlementLevyAt(2'000'000)), 50'000);   // 1 XID under the raised cap: proportional again
+    BOOST_CHECK_EQUAL(Consensus::SettlementLevy(COIN, p.SettlementLevyAt(3'000'000)), 100'000);  // 10 bp of 1 XID: the raised cap binds
 
     // ...but never lower one, never go backwards, never start anywhere but height 0.
     const std::vector<std::vector<SettlementLevyRule>> refused{
@@ -267,7 +268,7 @@ struct LevyChainSetup : public TestChain100Setup {
     LevyChainSetup() : LevyChainSetup{TestOpts{.extra_args = {"-levybp=5"}}} {}
     explicit LevyChainSetup(TestOpts opts) : TestChain100Setup{ChainType::REGTEST, std::move(opts)} {}
 
-    /** Spend the whole block-1 coinbase (an ordinary 50 XCF era-0 coinbase to
+    /** Spend the whole block-1 coinbase (an ordinary 50 XID era-0 coinbase to
      *  the shared test key) into the given outputs, whose sum determines the fee. */
     CMutableTransaction Spend(const std::vector<CTxOut>& outputs)
     {
@@ -297,7 +298,7 @@ BOOST_AUTO_TEST_CASE(levy_mempool_boundary)
     BOOST_REQUIRE_EQUAL(in, 50 * COIN);
 
     // The exact boundary. With the cap (a1dd35a) the smallest fee that covers the
-    // levy on what is left is the cap itself: 49.9999 XCF out owes 0.0001 XCF.
+    // levy on what is left is the cap itself: 49.9999 XID out owes 0.0001 XID.
     const CAmount f_min{SettlementLevyFromInputs(in, bp)};
     BOOST_CHECK_EQUAL(f_min, Consensus::SETTLEMENT_LEVY_CAP_SAT);
     BOOST_CHECK_EQUAL(f_min, 10'000);
@@ -310,8 +311,8 @@ BOOST_AUTO_TEST_CASE(levy_mempool_boundary)
     BOOST_CHECK_EQUAL(Accept(SpendWithFee(0)), "bad-txns-levy");
 
     // The levy is on the sum of the outputs, capped once. At this size every
-    // split sits far above the 0.2 XCF crossover, so the sum owes the cap
-    // whichever way it is cut; the uncapped 5 bp on 49.975 XCF, 2,498,750 sat,
+    // split sits far above the 0.2 XID crossover, so the sum owes the cap
+    // whichever way it is cut; the uncapped 5 bp on 49.975 XID, 2,498,750 sat,
     // is the figure the cap replaced.
     const CAmount out_total{in - 2'500'000};
     BOOST_CHECK_EQUAL(SettlementLevyUncapped(out_total, bp), 2'498'750);

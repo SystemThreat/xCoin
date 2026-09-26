@@ -115,6 +115,42 @@ struct ConnmanTestMsg : public CConnman {
 
     CNode* ConnectNodePublic(PeerManager& peerman, const char* pszDest, ConnectionType conn_type)
         EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+
+    void SetV2HybridMode(V2HybridMode mode) { m_v2_hybrid_mode = mode; }
+
+    void DisconnectNodesPublic() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex, !m_v2_hybrid_retry_mutex)
+    {
+        DisconnectNodes();
+    }
+
+    void PerformReconnectionsPublic()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_unused_i2p_sessions_mutex, !m_v2_hybrid_retry_mutex)
+    {
+        PerformReconnections();
+    }
+
+    /** A queued reconnection: its destination (or address), whether it uses v2, and whether it is an HX1 classical
+     *  retry itself (a MANUAL destination's retry is a mark on the destination instead). */
+    struct QueuedReconnection {
+        std::string destination;
+        bool use_v2transport;
+        bool hybrid_classical_retry;
+    };
+    std::vector<QueuedReconnection> QueuedReconnections() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex)
+    {
+        LOCK(m_reconnections_mutex);
+        std::vector<QueuedReconnection> ret;
+        for (const auto& item : m_reconnections) {
+            ret.push_back({item.destination.empty() ? item.addr_connect.ToStringAddrPort() : item.destination,
+                           item.use_v2transport, item.hybrid_classical_retry});
+        }
+        return ret;
+    }
+
+    bool HasV2HybridRetryMark(const std::string& dest) EXCLUSIVE_LOCKS_REQUIRED(!m_v2_hybrid_retry_mutex)
+    {
+        return WITH_LOCK(m_v2_hybrid_retry_mutex, return m_v2_hybrid_retry_dests.contains(dest));
+    }
 };
 
 constexpr ServiceFlags ALL_SERVICE_FLAGS[]{

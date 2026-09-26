@@ -415,7 +415,7 @@ TestChain100Setup::TestChain100Setup(
     {
         LOCK(::cs_main);
         // This deterministic tip depends on every coinbase the fixture mines
-        // (block 1 included: an ordinary 50 XCF era-0 block since 7263c5d, paid
+        // (block 1 included: an ordinary 50 XID era-0 block since 7263c5d, paid
         // to the shared test ML-DSA key), so it changes whenever the regtest
         // emission table or the coinbase shape changes.
         // Printed before the assert so a regeneration can read the new value.

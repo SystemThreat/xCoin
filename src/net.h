@@ -11,6 +11,7 @@
 #include <common/bloom.h>
 #include <compat/compat.h>
 #include <consensus/amount.h>
+#include <crypto/mlkem768.h>
 #include <crypto/siphash.h>
 #include <hash.h>
 #include <i2p.h>
@@ -30,9 +31,11 @@
 #include <sync.h>
 #include <uint256.h>
 #include <util/check.h>
+#include <util/expected.h>
 #include <util/sock.h>
 #include <util/threadinterrupt.h>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -43,6 +46,7 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <set>
 #include <string_view>
 #include <thread>
 #include <unordered_set>
@@ -105,8 +109,32 @@ static const size_t DEFAULT_MAXRECEIVEBUFFER = 5 * 1000;
 static const size_t DEFAULT_MAXSENDBUFFER    = 1 * 1000;
 
 static constexpr bool DEFAULT_V2_TRANSPORT{true};
+/** -v2hybrid default, the same on every network (XIP-4). */
+static constexpr V2HybridMode DEFAULT_V2_HYBRID{V2HybridMode::PREFER};
 
 typedef int64_t NodeId;
+
+/** What happened to an HX1 handshake (XIP-4), as counted in getnetworkinfo's v2hybrid_counts. */
+enum class V2HybridOutcome : uint8_t {
+    HYBRID,          //!< key confirmation reached
+    CLASSICAL,       //!< the peer's version packet carried no HX1 record, in prefer mode
+    REFUSED,         //!< require mode turned the peer away
+    BAD_RECORD,      //!< a malformed HX1 record, or an encapsulation key that failed the FIPS 203 section 7.2 check
+    STAGE2_FAILED,   //!< the peer's first stage-2 packet failed, or the handshake timed out before key confirmation
+    LOCAL_ERROR,     //!< this node's own ML-KEM or RNG call failed
+    CLASSICAL_RETRY, //!< a classical retry connection was opened
+};
+static constexpr size_t V2_HYBRID_OUTCOMES{7};
+
+/** HX1 counters since startup, indexed by V2HybridOutcome. */
+using V2HybridCounters = std::array<std::atomic<uint64_t>, V2_HYBRID_OUTCOMES>;
+
+/** The getnetworkinfo name of an outcome: "hybrid", "classical", ... */
+std::string_view V2HybridOutcomeName(V2HybridOutcome outcome);
+/** The getnetworkinfo name of a mode: "off", "prefer" or "require". */
+std::string_view V2HybridModeName(V2HybridMode mode);
+/** Parse a -v2hybrid value, which must be exactly "0", "1" or "2". */
+std::optional<V2HybridMode> ParseV2HybridMode(std::string_view value);
 
 struct AddedNodeParams {
     std::string m_added_node;
@@ -232,6 +260,8 @@ public:
     TransportProtocolType m_transport_type;
     /** BIP324 session id string in hex, if any. */
     std::string m_session_id;
+    /** Whether the session runs on confirmed HX1 stage-2 keys (XIP-4). */
+    bool m_transport_hybrid;
 };
 
 
@@ -271,6 +301,8 @@ public:
     {
         TransportProtocolType transport_type;
         std::optional<uint256> session_id;
+        /** The session runs on HX1 stage-2 keys the peer has confirmed (XIP-4). */
+        bool hybrid{false};
     };
 
     /** Retrieve information about this transport. */
@@ -374,6 +406,23 @@ public:
 
     /** Whether upon disconnections, a reconnect with V1 is warranted. */
     virtual bool ShouldReconnectV1() const noexcept = 0;
+
+    /** The HX1 handshake state (XIP-4) CConnman acts on when the connection ends or times out. */
+    struct HybridStatus
+    {
+        /** Both directions use stage-2 keys and no stage-2 packet from the peer has authenticated yet. */
+        bool unconfirmed{false};
+        /** Outbound in prefer mode, the peer's version packet carried the HX1 tag and version, no key confirmation
+         *  and no local error: the connection, lost now, is retried once as classical v2 unless this node closed it. */
+        bool retry_classical{false};
+        /** The HX1 failure this transport detected, if any. */
+        std::optional<V2HybridOutcome> failure;
+        /** Require mode stopped a v1 reconnect that ShouldReconnectV1() would ask for in the other modes. */
+        bool v1_refused{false};
+    };
+
+    /** Retrieve the HX1 handshake state. */
+    virtual HybridStatus GetHybridStatus() const noexcept = 0;
 };
 
 class V1Transport final : public Transport
@@ -456,6 +505,17 @@ public:
     void MarkBytesSent(size_t bytes_sent) noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
     size_t GetSendMemoryUsage() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
     bool ShouldReconnectV1() const noexcept override { return false; }
+    HybridStatus GetHybridStatus() const noexcept override { return {}; }
+};
+
+/** The ML-KEM-768 calls of an HX1 handshake (XIP-4). Tests replace them to fix the seeds or inject failures. */
+struct V2HybridKem {
+    std::function<util::Expected<mlkem768::KeyPair, mlkem768::Error>()> keygen{mlkem768::GenerateKeyPair};
+    std::function<util::Expected<mlkem768::Encapsulation, mlkem768::Error>(std::span<const std::byte, mlkem768::ENCAPS_KEY_SIZE>)>
+        encaps{mlkem768::Encapsulate};
+    std::function<util::Expected<mlkem768::SharedSecret, mlkem768::Error>(std::span<const std::byte, mlkem768::DECAPS_KEY_SIZE>,
+                                                                         std::span<const std::byte, mlkem768::CIPHERTEXT_SIZE>)>
+        decaps{mlkem768::Decaps};
 };
 
 class V2Transport final : public Transport
@@ -550,8 +610,9 @@ private:
      *      |      start(initiator)
      *      |            |
      *      v            v
-     *  MAYBE_V1 -> AWAITING_KEY -> READY
-     *      |
+     *  MAYBE_V1 -> AWAITING_KEY ------------------------> READY
+     *      |            |                                   ^
+     *      |            \-----> AWAITING_VERSION -----------/
      *      \-----> V1
      */
     enum class SendState : uint8_t {
@@ -567,15 +628,25 @@ private:
          *
          * This is the initial state for initiators. The public key and garbage is sent out. When
          * the receiver receives the other side's public key and transitions to GARB_GARBTERM, the
-         * sender state becomes READY. */
+         * sender state becomes READY (AWAITING_VERSION in the HX1 modes). */
         AWAITING_KEY,
+
+        /** (HX1 modes 1 and 2 only) Waiting for the other side's version packet.
+         *
+         * Entered from AWAITING_KEY. The garbage terminator has been appended to the send buffer,
+         * and a responder has also appended its version packet with the HX1 offer. Nothing else is
+         * sent in this state. When the other side's version packet has been processed, an
+         * initiator appends its own version packet, both sides switch to stage-2 keys if HX1 was
+         * negotiated (a responder then appends its confirmation packet), and the state becomes
+         * READY. */
+        AWAITING_VERSION,
 
         /** Normal sending state.
          *
          * In this state, the ciphers are initialized, so packets can be sent. When this state is
-         * entered, the garbage terminator and version packet are appended to the send buffer (in
-         * addition to the key and garbage which may still be there). In this state a message can be
-         * provided if the send buffer is empty. */
+         * entered from AWAITING_KEY, the garbage terminator and version packet are appended to the
+         * send buffer (in addition to the key and garbage which may still be there). In this state a
+         * message can be provided if the send buffer is empty. */
         READY,
 
         /** This transport is using v1 fallback.
@@ -592,6 +663,12 @@ private:
     const NodeId m_nodeid;
     /** Encapsulate a V1Transport to fall back to. */
     V1Transport m_v1_fallback;
+    /** The -v2hybrid mode of this connection. OFF is BIP324 exactly as before HX1 (XIP-4). */
+    const V2HybridMode m_hybrid_mode;
+    /** The ML-KEM calls of the HX1 handshake. */
+    const V2HybridKem m_hybrid_kem;
+    /** Where HX1 outcomes are counted, if anywhere. */
+    V2HybridCounters* const m_hybrid_counters;
 
     /** Lock for receiver-side fields. */
     mutable Mutex m_recv_mutex ACQUIRED_BEFORE(m_send_mutex);
@@ -607,6 +684,22 @@ private:
     /** Current receiver state. */
     RecvState m_recv_state GUARDED_BY(m_recv_mutex);
 
+    /** HX1 handshake progress (modes 1 and 2). */
+    enum class HybridState : uint8_t {
+        PENDING,     //!< the other side's version packet has not been processed
+        CLASSICAL,   //!< it carried no HX1 record: the session keeps the stage-1 keys
+        UNCONFIRMED, //!< both directions use stage-2 keys; no stage-2 packet from the peer authenticated yet
+        CONFIRMED,   //!< a stage-2 packet from the peer authenticated (key confirmation)
+        FAILED,      //!< the handshake failed; the connection is being closed
+    };
+    HybridState m_hybrid_state GUARDED_BY(m_recv_mutex){HybridState::PENDING};
+    /** Whether the other side's version packet carried the HX1 tag and version 01. */
+    bool m_hybrid_tag_seen GUARDED_BY(m_recv_mutex){false};
+    /** The HX1 failure, once one happened. */
+    std::optional<V2HybridOutcome> m_hybrid_failure GUARDED_BY(m_recv_mutex);
+    /** Responder only: the ML-KEM key pair offered in our version packet, until the initiator's is processed. */
+    std::unique_ptr<mlkem768::KeyPair> m_hybrid_key_pair GUARDED_BY(m_recv_mutex);
+
     /** Lock for sending-side fields. If both sending and receiving fields are accessed,
      *  m_recv_mutex must be acquired before m_send_mutex. */
     mutable Mutex m_send_mutex ACQUIRED_AFTER(m_recv_mutex);
@@ -614,7 +707,7 @@ private:
     std::vector<uint8_t> m_send_buffer GUARDED_BY(m_send_mutex);
     /** How many bytes from the send buffer have been sent so far. */
     uint32_t m_send_pos GUARDED_BY(m_send_mutex) {0};
-    /** The garbage sent, or to be sent (MAYBE_V1 and AWAITING_KEY state only). */
+    /** The garbage sent, or to be sent (MAYBE_V1 and AWAITING_KEY state, and AWAITING_VERSION for initiators). */
     std::vector<uint8_t> m_send_garbage GUARDED_BY(m_send_mutex);
     /** Type of the message being sent. */
     std::string m_send_type GUARDED_BY(m_send_mutex);
@@ -622,6 +715,8 @@ private:
     SendState m_send_state GUARDED_BY(m_send_mutex);
     /** Whether we've sent at least 24 bytes (which would trigger disconnect for V1 peers). */
     bool m_sent_v1_header_worth GUARDED_BY(m_send_mutex) {false};
+    /** Initiator in an HX1 session: whether the next packet sent is the first under stage-2 keys. */
+    bool m_hybrid_first_send GUARDED_BY(m_send_mutex) {false};
 
     /** Change the receive state. */
     void SetReceiveState(RecvState recv_state) noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex);
@@ -633,27 +728,62 @@ private:
     size_t GetMaxBytesToProcess() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex);
     /** Put our public key + garbage in the send buffer. */
     void StartSendingHandshake() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_send_mutex);
-    /** Process bytes in m_recv_buffer, while in KEY_MAYBE_V1 state. */
-    void ProcessReceivedMaybeV1Bytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, !m_send_mutex);
+    /** Process bytes in m_recv_buffer, while in KEY_MAYBE_V1 state. Returns false if the connection must end. */
+    bool ProcessReceivedMaybeV1Bytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, !m_send_mutex);
     /** Process bytes in m_recv_buffer, while in KEY state. */
     bool ProcessReceivedKeyBytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, !m_send_mutex);
     /** Process bytes in m_recv_buffer, while in GARB_GARBTERM state. */
     bool ProcessReceivedGarbageBytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex);
     /** Process bytes in m_recv_buffer, while in VERSION/APP state. */
-    bool ProcessReceivedPacketBytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex);
+    bool ProcessReceivedPacketBytes() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, !m_send_mutex);
+    /** HX1: the other side's key was received and the ciphers are initialized. */
+    bool ProcessHybridKey() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, m_send_mutex);
+    /** HX1: act on the other side's version packet, whose contents are in m_recv_decode_buffer. */
+    bool ProcessHybridVersion() noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, !m_send_mutex);
+    /** HX1: record, count and log the end of the handshake, and wipe its secrets. */
+    void HybridFail(V2HybridOutcome outcome) noexcept EXCLUSIVE_LOCKS_REQUIRED(m_recv_mutex, m_send_mutex);
+    /** HX1: count an outcome. */
+    void CountHybrid(V2HybridOutcome outcome) const noexcept;
+    /** ShouldReconnectV1()'s condition before the -v2hybrid mode is applied: nothing received, 24 bytes sent. */
+    bool V1ReconnectCondition() const noexcept EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex, !m_send_mutex);
 
 public:
     static constexpr uint32_t MAX_GARBAGE_LEN = 4095;
 
+    /** HX1 version packet records (XIP-4, "Version packet contents"). */
+    static constexpr std::array<uint8_t, 8> HYBRID_TAG{'x', 'c', 'o', 'i', 'n', '-', 'p', 'q'};
+    static constexpr uint8_t HYBRID_VERSION{0x01};
+    static constexpr uint8_t HYBRID_KIND_OFFER{0x01};
+    static constexpr uint8_t HYBRID_KIND_ACCEPT{0x02};
+    static constexpr size_t HYBRID_HEADER_LEN{12};
+    /** The most contents each side's first stage-2 packet may have; enforced on receipt until key confirmation. */
+    static constexpr uint32_t HYBRID_FIRST_PACKET_MAX_CONTENTS{4095};
+
+    /** How version packet contents classify (XIP-4). */
+    enum class HybridRecord : uint8_t {
+        NONE,      //!< no HX1 record: empty, unknown, or a later HX version
+        MALFORMED, //!< the HX1 tag and version 01, but not exactly the expected record
+        VALID,     //!< the expected record; its body is ek (OFFER) or ct (ACCEPT)
+    };
+
+    /** Classify version packet contents. Only the first record is read; body is set when VALID. */
+    static HybridRecord ClassifyHybridRecord(std::span<const uint8_t> contents, uint8_t expected_kind,
+                                             std::span<const uint8_t>& body) noexcept;
+
     /** Construct a V2 transport with securely generated random keys.
      *
-     * @param[in] nodeid      the node's NodeId (only for debug log output).
-     * @param[in] initiating  whether we are the initiator side.
+     * @param[in] nodeid          the node's NodeId (only for debug log output).
+     * @param[in] initiating      whether we are the initiator side.
+     * @param[in] hybrid_mode     the -v2hybrid mode (XIP-4).
+     * @param[in] hybrid_counters where HX1 outcomes are counted, or nullptr.
      */
-    V2Transport(NodeId nodeid, bool initiating) noexcept;
+    V2Transport(NodeId nodeid, bool initiating, V2HybridMode hybrid_mode = V2HybridMode::OFF,
+                V2HybridCounters* hybrid_counters = nullptr) noexcept;
 
     /** Construct a V2 transport with specified keys and garbage (test use only). */
-    V2Transport(NodeId nodeid, bool initiating, const CKey& key, std::span<const std::byte> ent32, std::vector<uint8_t> garbage) noexcept;
+    V2Transport(NodeId nodeid, bool initiating, const CKey& key, std::span<const std::byte> ent32, std::vector<uint8_t> garbage,
+                V2HybridMode hybrid_mode = V2HybridMode::OFF, V2HybridKem hybrid_kem = {},
+                V2HybridCounters* hybrid_counters = nullptr) noexcept;
 
     // Receive side functions.
     bool ReceivedMessageComplete() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex);
@@ -669,6 +799,7 @@ public:
     // Miscellaneous functions.
     bool ShouldReconnectV1() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex, !m_send_mutex);
     Info GetInfo() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex);
+    HybridStatus GetHybridStatus() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex, !m_send_mutex);
 };
 
 struct CNodeOptions
@@ -678,6 +809,8 @@ struct CNodeOptions
     bool prefer_evict = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
+    V2HybridMode v2_hybrid_mode = V2HybridMode::OFF;
+    V2HybridCounters* v2_hybrid_counters = nullptr;
 };
 
 /** Information about a peer */
@@ -741,6 +874,23 @@ public:
     // Setting fDisconnect to true will cause the node to be disconnected the
     // next time DisconnectNodes() runs
     std::atomic_bool fDisconnect{false};
+
+    /** Why the connection ended, for the causes that let an HX1 handshake be retried as classical v2 (XIP-4).
+     *  Disconnects this node decides on itself (disconnectnode, a ban, eviction, shutdown, the network turned off)
+     *  leave it NONE. */
+    enum class HybridCloseCause : uint8_t {
+        NONE,
+        TRANSPORT, //!< the transport rejected the peer's bytes
+        PEER,      //!< the peer closed the connection, or the socket failed
+        TIMEOUT,   //!< the handshake timed out
+    };
+    std::atomic<HybridCloseCause> m_hybrid_close_cause{HybridCloseCause::NONE};
+    /** Record the cause, unless the node was already being disconnected for another reason. */
+    void SetHybridCloseCause(HybridCloseCause cause)
+    {
+        if (!fDisconnect) m_hybrid_close_cause = cause;
+    }
+
     CountingSemaphoreGrant<> grantOutbound;
     std::atomic<int> nRefCount{0};
 
@@ -1102,6 +1252,7 @@ public:
         bool whitelist_forcerelay = DEFAULT_WHITELISTFORCERELAY;
         bool whitelist_relay = DEFAULT_WHITELISTRELAY;
         bool m_capture_messages = false;
+        V2HybridMode m_v2_hybrid_mode = DEFAULT_V2_HYBRID;
     };
 
     void Init(const Options& connOptions) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_total_bytes_sent_mutex)
@@ -1109,6 +1260,7 @@ public:
         AssertLockNotHeld(m_total_bytes_sent_mutex);
 
         m_local_services = connOptions.m_local_services;
+        m_v2_hybrid_mode = connOptions.m_v2_hybrid_mode;
         m_max_automatic_connections = connOptions.m_max_automatic_connections;
         m_max_outbound_full_relay = std::min(MAX_OUTBOUND_FULL_RELAY_CONNECTIONS, m_max_automatic_connections);
         m_max_outbound_block_relay = std::min(MAX_BLOCK_RELAY_ONLY_CONNECTIONS, m_max_automatic_connections - m_max_outbound_full_relay);
@@ -1180,6 +1332,8 @@ public:
      * @param[in] conn_type Type of the connection to open, must not be `ConnectionType::INBOUND`.
      * @param[in] use_v2transport Use P2P encryption, (aka V2 transport, BIP324).
      * @param[in] proxy_override Optional proxy to use and override normal proxy selection.
+     * @param[in] hybrid_classical_retry This is the one classical retry of a failed HX1 handshake: run it with
+     *            -v2hybrid=0 (XIP-4). A MANUAL destination marked for the retry gets it regardless.
      * @retval true The connection was opened successfully.
      * @retval false The connection attempt failed.
      */
@@ -1189,8 +1343,9 @@ public:
                                const char* pszDest,
                                ConnectionType conn_type,
                                bool use_v2transport,
-                               const std::optional<Proxy>& proxy_override = std::nullopt)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+                               const std::optional<Proxy>& proxy_override = std::nullopt,
+                               bool hybrid_classical_retry = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex, !m_v2_hybrid_retry_mutex);
 
     /// Group of private broadcast related members.
     class PrivateBroadcast
@@ -1335,8 +1490,8 @@ public:
     // Count the number of block-relay-only peers we have over our limit.
     int GetExtraBlockRelayCount() const;
 
-    bool AddNode(const AddedNodeParams& add) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex);
-    bool RemoveAddedNode(std::string_view node) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex);
+    bool AddNode(const AddedNodeParams& add) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_v2_hybrid_retry_mutex);
+    bool RemoveAddedNode(std::string_view node) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_v2_hybrid_retry_mutex);
     bool AddedNodesContain(const CAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex);
     std::vector<AddedNodeInfo> GetAddedNodeInfo(bool include_connected) const EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex);
 
@@ -1353,7 +1508,7 @@ public:
      *                          - Max total outbound connection capacity filled
      *                          - Max connection capacity for type is filled
      */
-    bool AddConnection(const std::string& address, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    bool AddConnection(const std::string& address, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex, !m_v2_hybrid_retry_mutex);
 
     size_t GetNodeCount(ConnectionDirection) const;
     std::map<CNetAddr, LocalServiceInfo> getNetLocalAddresses() const;
@@ -1376,6 +1531,13 @@ public:
     //! during connection handshake.
     void AddLocalServices(ServiceFlags services) { m_local_services = ServiceFlags(m_local_services | services); };
     void RemoveLocalServices(ServiceFlags services) { m_local_services = ServiceFlags(m_local_services & ~services); }
+
+    /** The -v2hybrid mode (XIP-4). */
+    V2HybridMode GetV2HybridMode() const { return m_v2_hybrid_mode; }
+    /** Whether an automatic outbound connection to an address advertising `their_services` uses v2. */
+    bool UseV2TransportTo(ServiceFlags their_services) const;
+    /** The HX1 counters since startup, indexed by V2HybridOutcome. */
+    std::array<uint64_t, V2_HYBRID_OUTCOMES> GetV2HybridCounts() const;
 
     uint64_t GetMaxOutboundTarget() const EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
     std::chrono::seconds GetMaxOutboundTimeframe() const;
@@ -1426,13 +1588,13 @@ private:
     bool Bind(const CService& addr, unsigned int flags, NetPermissionFlags permissions);
     bool InitBinds(const Options& options);
 
-    void ThreadOpenAddedConnections() EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_unused_i2p_sessions_mutex, !m_reconnections_mutex);
+    void ThreadOpenAddedConnections() EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_unused_i2p_sessions_mutex, !m_reconnections_mutex, !m_v2_hybrid_retry_mutex);
     void AddAddrFetch(const std::string& strDest) EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex);
-    void ProcessAddrFetch() EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_unused_i2p_sessions_mutex);
-    void ThreadOpenConnections(std::vector<std::string> connect, std::span<const std::string> seed_nodes) EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_added_nodes_mutex, !m_nodes_mutex, !m_unused_i2p_sessions_mutex, !m_reconnections_mutex);
+    void ProcessAddrFetch() EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_unused_i2p_sessions_mutex, !m_v2_hybrid_retry_mutex);
+    void ThreadOpenConnections(std::vector<std::string> connect, std::span<const std::string> seed_nodes) EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_added_nodes_mutex, !m_nodes_mutex, !m_unused_i2p_sessions_mutex, !m_reconnections_mutex, !m_v2_hybrid_retry_mutex);
     void ThreadMessageHandler() EXCLUSIVE_LOCKS_REQUIRED(!mutexMsgProc);
     void ThreadI2PAcceptIncoming();
-    void ThreadPrivateBroadcast() EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+    void ThreadPrivateBroadcast() EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex, !m_v2_hybrid_retry_mutex);
     void AcceptConnection(const ListenSocket& hListenSocket);
 
     /**
@@ -1448,7 +1610,7 @@ private:
                                       const CService& addr_bind,
                                       const CService& addr);
 
-    void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex);
+    void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex, !m_v2_hybrid_retry_mutex);
     void NotifyNumConnectionsChanged();
     /** Return true if the peer is inactive and should be disconnected. */
     bool InactivityCheck(const CNode& node, std::chrono::microseconds now) const;
@@ -1480,7 +1642,7 @@ private:
      */
     void SocketHandlerListening(const Sock::EventsPerSock& events_per_sock);
 
-    void ThreadSocketHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !mutexMsgProc, !m_nodes_mutex, !m_reconnections_mutex);
+    void ThreadSocketHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !mutexMsgProc, !m_nodes_mutex, !m_reconnections_mutex, !m_v2_hybrid_retry_mutex);
     void ThreadDNSAddressSeed() EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_nodes_mutex);
 
     uint64_t CalculateKeyedNetGroup(const CNetAddr& ad) const;
@@ -1525,8 +1687,12 @@ private:
                        bool fCountFailure,
                        ConnectionType conn_type,
                        bool use_v2transport,
-                       const std::optional<Proxy>& proxy_override)
+                       const std::optional<Proxy>& proxy_override,
+                       bool hybrid_classical_retry = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
+
+    /** Count an HX1 outcome. */
+    void CountHybrid(V2HybridOutcome outcome) { ++m_v2_hybrid_counters[static_cast<size_t>(outcome)]; }
 
     void AddWhitelistPermissionFlags(NetPermissionFlags& flags, std::optional<CNetAddr> addr, const std::vector<NetWhitelistPermissions>& ranges) const;
 
@@ -1654,6 +1820,16 @@ private:
      * \sa Peer::our_services
      */
     std::atomic<ServiceFlags> m_local_services;
+
+    /** The -v2hybrid mode (XIP-4). */
+    V2HybridMode m_v2_hybrid_mode{DEFAULT_V2_HYBRID};
+    /** HX1 counters since startup, indexed by V2HybridOutcome; the v2 transports count into it too. */
+    V2HybridCounters m_v2_hybrid_counters{};
+    /** MANUAL destinations whose next connection is the one HX1 classical retry. A queued reconnection is
+     *  dropped when the addnode or -connect loop reaches the destination first, so the retry sticks to the
+     *  destination instead, and whichever loop opens it next runs it. */
+    Mutex m_v2_hybrid_retry_mutex;
+    std::set<std::string> m_v2_hybrid_retry_dests GUARDED_BY(m_v2_hybrid_retry_mutex);
 
     std::unique_ptr<std::counting_semaphore<>> semOutbound;
     std::unique_ptr<std::counting_semaphore<>> semAddnode;
@@ -1786,6 +1962,7 @@ private:
         std::string destination;
         ConnectionType conn_type;
         bool use_v2transport;
+        bool hybrid_classical_retry{false};
     };
 
     /**
@@ -1794,7 +1971,7 @@ private:
     std::list<ReconnectionInfo> m_reconnections GUARDED_BY(m_reconnections_mutex);
 
     /** Attempt reconnections, if m_reconnections non-empty. */
-    void PerformReconnections() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_unused_i2p_sessions_mutex);
+    void PerformReconnections() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_unused_i2p_sessions_mutex, !m_v2_hybrid_retry_mutex);
 
     /**
      * Cap on the size of `m_unused_i2p_sessions`, to ensure it does not

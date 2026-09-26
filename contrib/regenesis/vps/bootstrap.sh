@@ -23,6 +23,23 @@ GENESIS_TESTNET_A=1dc4131ed2649a4782fbb8b25423e970084c7d217f730651d93cf09f6a43cc
 
 log() { printf '\n== %s\n' "$*"; }
 
+# Before anything on this machine changes: the tree must carry testnet A's final genesis, and
+# it must be the one pinned above. A tree whose TESTNET_GENESIS_IS_FINAL is false has the v1
+# genesis as a placeholder; its node refuses to start, and forced, it would open a new chain.
+log "preflight: the tarball's testnet A genesis is final and is ${GENESIS_TESTNET_A}"
+CHAINPARAMS_SRC=$(tar -xzOf "${SRC_TARBALL}" --wildcards '*/src/kernel/chainparams.cpp' 2>/dev/null || true)
+# Here-strings, not pipes: under pipefail a SIGPIPE in the writer would read as a refusal.
+if ! grep -q '^static constexpr bool TESTNET_GENESIS_IS_FINAL = true;' <<<"${CHAINPARAMS_SRC}"; then
+  echo "REFUSING: TESTNET_GENESIS_IS_FINAL is not true in this tree (testnet A is not re-mined in it)."
+  echo "Nothing was changed; the running node and its binary are untouched. See contrib/regenesis/TESTNET-A.md."
+  exit 1
+fi
+if ! grep -q "TESTNET_GENESIS_HASH *= \"${GENESIS_TESTNET_A}\"" <<<"${CHAINPARAMS_SRC}"; then
+  echo "REFUSING: this tree's TESTNET_GENESIS_HASH is not ${GENESIS_TESTNET_A}, the hash pinned in bootstrap.sh."
+  echo "Nothing was changed. Pin the re-mined genesis here (GENESIS_TESTNET_A) in the same commit."
+  exit 1
+fi
+
 log "0/7 swap: the build wants about 1.5 GB per compiler; make sure there is 4 GB of swap"
 SWAP_TOTAL_KB=$(awk '/SwapTotal/{print $2}' /proc/meminfo)
 if [ "${SWAP_TOTAL_KB:-0}" -lt 3500000 ] && [ ! -f /swapfile ]; then
@@ -157,7 +174,18 @@ for i in $(seq 1 20); do
   sleep 3
 done
 echo "genesis: ${G:-unavailable}"
-if [ "${G:-}" = "${GENESIS_TESTNET_A}" ]; then echo "OK: testnet A genesis matches"; else echo "MISMATCH or node not ready: expected ${GENESIS_TESTNET_A}"; fi
+if [ "${G:-}" = "${GENESIS_TESTNET_A}" ]; then
+  echo "OK: testnet A genesis matches"
+elif [ -n "${G:-}" ]; then
+  echo "MISMATCH: the node reports genesis ${G}, expected ${GENESIS_TESTNET_A}."
+  echo "Stopping and disabling xcoin-testneta so it does not build or relay a chain on the wrong genesis."
+  systemctl disable --now xcoin-testneta.service || true
+  exit 1
+else
+  echo "NOT READY: the node did not answer getblockhash 0 within 60 s (it may still be loading, or it refused to start)."
+  echo "Check: journalctl -u xcoin-testneta -n 50, then run: rcli getblockhash 0"
+  exit 1
+fi
 rcli getblockchaininfo 2>/dev/null | grep -E 'chain|blocks|headers' | head -3 || true
 echo
 echo "Done. Useful: rcli getconnectioncount | rcli getpeerinfo | journalctl -u xcoin-testneta -f"

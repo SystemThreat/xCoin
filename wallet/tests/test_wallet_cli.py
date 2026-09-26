@@ -131,9 +131,9 @@ class TestBalanceAndUtxos(Base):
         self.setUpRPC()
         rc, out = self.run_cli("balance", "--index", "1")
         self.assertEqual(rc, 0)
-        self.assertIn("Spendable:     0.00000000 XCF", out)
+        self.assertIn("Spendable:     0.00000000 XID", out)
         self.assertIn("immature", out.lower())
-        self.assertIn("100.00000000 XCF", out)
+        self.assertIn("100.00000000 XID", out)
     def test_balance_json(self):
         self.setUpRPC()
         rc, out = self.run_cli("--json", "balance", "--index", "1")
@@ -145,7 +145,7 @@ class TestBalanceAndUtxos(Base):
         self.setUpRPC()
         rc, out = self.run_cli("utxos", "--index", "1")
         self.assertEqual(out.count("IMMATURE"), 2)
-        self.assertIn("spendable: 0.00000000 XCF", out)
+        self.assertIn("spendable: 0.00000000 XID", out)
     def test_utxos_json(self):
         self.setUpRPC()
         rc, out = self.run_cli("--json", "utxos", "--index", "1")
@@ -240,7 +240,7 @@ class TestSend(Base):
         rc, out = self.run_cli("send", DEST, "1.0", "--yes", "--dry-run")
         self.assertIn("fallbackfee", out)
         expected = w.fee_for(1, 2, Decimal("0.0001"))
-        self.assertIn(f"{expected:f} XCF", out)
+        self.assertIn(f"{expected:f} XID", out)
 
 class TestHistory(Base):
     def setUpRPC(self):

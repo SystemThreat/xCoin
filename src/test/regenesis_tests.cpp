@@ -3,9 +3,12 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 // Re-genesis stage A1 (contrib/regenesis/REGENESIS.md sections 2 and 3):
-// the emission table; stage A1b: the FINAL schedule (no premine, 14 XCF halved
-// every 750,000 blocks until it reaches zero) and block 1 an ordinary block on
-// every chain (no distribution, nothing carried in: 35c4fda, 7263c5d).
+// the emission table; stage A1b: no premine, block 1 an ordinary block on every
+// chain (no distribution, nothing carried in: 35c4fda, 7263c5d). Owner decision
+// 2026-09-25: the cap is 100,000,000 XID of 10^8 sat and the shape of the table is
+// FINAL, the Annual Tenth (charter section 4); it is pinned only in [EMISSION-SHAPE]
+// annual_tenth_emission_shape below; every other emission test holds for any
+// table contrib/regenesis/emission.py generates.
 // Stage A2 (sections 0 and 5): block weight and the per-block data-carrier cap.
 // Stage A3 (sections 1, 3 and 8): the charter commitment, the currency id and
 // the genesis tooling.
@@ -91,7 +94,7 @@ CTxOut NullDataOut(CAmount value = 0)
 
 BOOST_FIXTURE_TEST_SUITE(regenesis_tests, BasicTestingSetup)
 
-// (a) sum(subsidies from height 1 to EMISSION_END_HEIGHT) == 21,000,000 XCF exactly.
+// (a) sum(subsidies from height 1 to EMISSION_END_HEIGHT) == 100,000,000 XID exactly.
 // There is no premine and nothing is carried in; the dust is minted exactly once, on
 // the last block.
 BOOST_AUTO_TEST_CASE(emission_sums_to_cap_mainnet)
@@ -116,22 +119,63 @@ BOOST_AUTO_TEST_CASE(emission_sums_to_cap_mainnet)
     }
     // The dust block, and only it (a schedule that divided the cap exactly would leave no dust).
     BOOST_CHECK_EQUAL(off_rate_blocks, Consensus::EMISSION_CLOSING_DUST_SAT > 0 ? 1 : 0);
-    BOOST_CHECK(Consensus::EMISSION_CLOSING_DUST_SAT > 0); // 0.09 XCF, pinned in subsidy_at_era_boundaries
     BOOST_CHECK_EQUAL(emitted, Consensus::TOTAL_EMISSION_SAT);
     BOOST_CHECK_EQUAL(emitted, Consensus::MAX_SUPPLY_SAT);
     BOOST_CHECK_EQUAL(Consensus::MAX_SUPPLY_SAT, MAX_MONEY);
 
 }
 
-// The regtest table has the mainnet shape (50 XCF for one 150-block era, three halvings,
-// 6.25 XCF until the cap; the remainder divides exactly, so the dust is 0), from height 1
-// like every chain, and closes on the cap too.
+// DECIDED (owner decision 2026-09-25): the cap is exactly 100,000,000 XID with 8
+// decimals, MAX_MONEY is that cap, and the mainnet table plus its closing dust sums
+// to it on every chain that runs the table. The old 21,000,000 cap no longer binds
+// anything: an output one satoshi over it is in range.
+BOOST_AUTO_TEST_CASE(emission_cap_is_100m_xid)
+{
+    BOOST_CHECK_EQUAL(COIN, CAmount{100'000'000LL});                     // 8 decimals
+    BOOST_CHECK_EQUAL(MAX_MONEY, CAmount{100'000'000LL} * COIN);          // 10^16 sat
+    BOOST_CHECK_EQUAL(MAX_MONEY, CAmount{10'000'000'000'000'000LL});
+    BOOST_CHECK_EQUAL(Consensus::MAX_SUPPLY_SAT, MAX_MONEY);
+    BOOST_CHECK_EQUAL(Consensus::TOTAL_EMISSION_SAT, MAX_MONEY);
+    BOOST_CHECK_EQUAL(Consensus::EmissionTableTotalSat(Consensus::EMISSION_TABLE, Consensus::NUM_EMISSION_ERAS) + Consensus::EMISSION_CLOSING_DUST_SAT,
+                      CAmount{100'000'000LL} * COIN);
+    for (const ChainType type : {ChainType::MAIN, ChainType::TESTNET, ChainType::REGTEST}) {
+        const auto p{CreateChainParams(*m_node.args, type)};
+        const auto& cp{p->GetConsensus()};
+        CAmount sum{cp.emissionClosingDustSat};
+        for (const auto& era : cp.emissionTable) sum += era.baseSubsidy * (era.endHeight - era.startHeight + 1);
+        BOOST_CHECK_MESSAGE(sum == 100'000'000 * COIN, ChainTypeToString(type) + " emission does not sum to 100,000,000 XID");
+    }
+    BOOST_CHECK(MoneyRange(21'000'000 * COIN + 1));
+    BOOST_CHECK(MoneyRange(MAX_MONEY));
+    BOOST_CHECK(!MoneyRange(MAX_MONEY + 1));
+
+    // CheckTransaction's range checks follow the new bound (CVE-2010-5139 checks).
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
+    tx.vout.emplace_back(MAX_MONEY, CScript() << OP_3 << std::vector<unsigned char>(32, 0x33));
+    TxValidationState ok_state;
+    BOOST_CHECK(CheckTransaction(CTransaction{tx}, ok_state, /*permit_v2_outputs=*/false, Consensus::MIN_OUTPUT_VALUE_SAT));
+    tx.vout[0].nValue = MAX_MONEY + 1;
+    TxValidationState big_state;
+    BOOST_CHECK(!CheckTransaction(CTransaction{tx}, big_state, /*permit_v2_outputs=*/false, Consensus::MIN_OUTPUT_VALUE_SAT));
+    BOOST_CHECK_EQUAL(big_state.GetRejectReason(), "bad-txns-vout-toolarge");
+    tx.vout[0].nValue = MAX_MONEY;
+    tx.vout.push_back(tx.vout[0]);
+    tx.vout[1].nValue = 1;
+    TxValidationState sum_state;
+    BOOST_CHECK(!CheckTransaction(CTransaction{tx}, sum_state, /*permit_v2_outputs=*/false, /*min_output_value=*/0));
+    BOOST_CHECK_EQUAL(sum_state.GetRejectReason(), "bad-txns-txouttotal-toolarge");
+}
+
+// The regtest table is a fixture (50 XID for one 150-block era, three halvings,
+// 6.25 XID until the cap; the remainder divides exactly, so the dust is 0), from
+// height 1 like every chain, and closes on the same 100,000,000 XID cap.
 BOOST_AUTO_TEST_CASE(emission_sums_to_cap_regtest)
 {
     const auto params{CreateChainParams(*m_node.args, ChainType::REGTEST)};
     const auto& cp{params->GetConsensus()};
     BOOST_CHECK_EQUAL(cp.emissionTable.size(), 4U);
-    BOOST_CHECK_EQUAL(cp.EmissionEndHeight(), 3358350);
+    BOOST_CHECK_EQUAL(cp.EmissionEndHeight(), 15998350);
     BOOST_CHECK_EQUAL(cp.emissionClosingDustSat, 0);
     CAmount minted{0};
     for (int h = 0; h <= cp.EmissionEndHeight() + 10; ++h) minted += GetBlockSubsidy(h, cp);
@@ -145,73 +189,176 @@ BOOST_AUTO_TEST_CASE(emission_sums_to_cap_regtest)
     BOOST_CHECK_EQUAL(GetBlockSubsidy(450, cp), CAmount{1'250'000'000LL});
     BOOST_CHECK_EQUAL(GetBlockSubsidy(451, cp), CAmount{625'000'000LL});
     BOOST_CHECK_EQUAL(GetBlockSubsidy(601, cp), CAmount{625'000'000LL}); // era 3 runs past its 150-block span
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(3358350, cp), CAmount{625'000'000LL}); // last block; no dust on regtest
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(3358351, cp), 0);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(15998350, cp), CAmount{625'000'000LL}); // last block; no dust on regtest
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(15998351, cp), 0);
 }
 
-// (b) subsidy at every era boundary and at the dust block.
+// (b) subsidy at every era boundary and at the dust block, for whatever table the
+// policy generates.
 BOOST_AUTO_TEST_CASE(subsidy_at_era_boundaries)
 {
     const auto params{CreateChainParams(*m_node.args, ChainType::MAIN)};
     const auto& cp{params->GetConsensus()};
+    BOOST_CHECK_EQUAL(Consensus::EMISSION_START_HEIGHT, 1);
     for (int i = 0; i < Consensus::NUM_EMISSION_ERAS; ++i) {
         const auto& era{Consensus::EMISSION_TABLE[i]};
         const bool last{i == Consensus::NUM_EMISSION_ERAS - 1};
-        // Eras 0-2 are exactly 3 years; era 3 starts after the third halving and runs to the cap.
-        const int blocks{era.endHeight - era.startHeight + 1};
-        if (last) {
-            BOOST_CHECK(blocks >= Consensus::EMISSION_ERA_BLOCKS);
-        } else {
-            BOOST_CHECK_EQUAL(blocks, Consensus::EMISSION_ERA_BLOCKS);
+        BOOST_CHECK_EQUAL(era.startHeight, i == 0 ? Consensus::EMISSION_START_HEIGHT : Consensus::EMISSION_TABLE[i - 1].endHeight + 1);
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(era.startHeight, cp), era.baseSubsidy + (last && era.startHeight == era.endHeight ? Consensus::EMISSION_CLOSING_DUST_SAT : 0));
+        if (era.endHeight > era.startHeight) {
+            BOOST_CHECK_EQUAL(GetBlockSubsidy(era.startHeight + 1, cp), era.baseSubsidy + (last && era.startHeight + 1 == era.endHeight ? Consensus::EMISSION_CLOSING_DUST_SAT : 0));
+            BOOST_CHECK_EQUAL(GetBlockSubsidy(era.endHeight - 1, cp), era.baseSubsidy);
         }
-        BOOST_CHECK_EQUAL(GetBlockSubsidy(era.startHeight, cp), era.baseSubsidy);
-        BOOST_CHECK_EQUAL(GetBlockSubsidy(era.startHeight + 1, cp), era.baseSubsidy);
-        BOOST_CHECK_EQUAL(GetBlockSubsidy(era.endHeight - 1, cp), era.baseSubsidy);
         BOOST_CHECK_EQUAL(GetBlockSubsidy(era.endHeight, cp), era.baseSubsidy + (last ? Consensus::EMISSION_CLOSING_DUST_SAT : 0));
-        // The block before an era pays the previous era's subsidy (block 0 pays none).
+        // The block before a row pays the previous row's subsidy (block 0 pays none).
         BOOST_CHECK_EQUAL(GetBlockSubsidy(era.startHeight - 1, cp), i == 0 ? 0 : Consensus::EMISSION_TABLE[i - 1].baseSubsidy);
-        // The block after an era pays the next era's subsidy (none after the last).
+        // The block after a row pays the next row's subsidy (none after the last).
         BOOST_CHECK_EQUAL(GetBlockSubsidy(era.endHeight + 1, cp), last ? 0 : Consensus::EMISSION_TABLE[i + 1].baseSubsidy);
-        // Every era pays exactly half of the previous one.
-        if (i > 0) BOOST_CHECK_EQUAL(era.baseSubsidy, Consensus::EMISSION_TABLE[i - 1].baseSubsidy / 2);
     }
-    // The FINAL schedule (founder decision 2026-09-14): 14 XCF, halved every 750,000
-    // blocks in whole satoshis until the shift reaches zero — 31 eras; the last
-    // subsidy block also mints the 0.09 XCF remainder so the total is the cap exactly.
-    BOOST_CHECK_EQUAL(Consensus::NUM_EMISSION_ERAS, 31);
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_ERA_BLOCKS, 750'000);
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_START_HEIGHT, 1);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, cp), 14 * COIN);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(2, cp), CAmount{1'400'000'000LL});
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(750'000, cp), 14 * COIN);                // last block of era 0
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(750'001, cp), 7 * COIN);                 // first halving
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(1'500'001, cp), CAmount{350'000'000LL}); // 3.5 XCF
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(5'250'000, cp), CAmount{21'875'000LL});  // era 6 ends here (the 49th year): 0.21875 XCF
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(5'250'001, cp), CAmount{10'937'500LL});  // era 7: 0.109375 XCF, fading
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(7'500'001, cp), CAmount{1'367'187LL});   // era 10: the first halving that rounds down (2,734,375 / 2)
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(22'500'001, cp), 1);                     // era 30: one satoshi
-    // Pinned FINAL values: 14 x 750,000 x 2 = 21,000,000 less the rounding of thirty
-    // halvings, 0.09 XCF, minted with the final subsidy at height 23,250,000 (~2248).
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_END_HEIGHT, 23'250'000);
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_CLOSING_DUST_SAT, CAmount{9'000'000LL});
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(23'249'999, cp), 1);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_END_HEIGHT, cp), CAmount{1 + 9'000'000LL});
+    BOOST_CHECK_EQUAL(Consensus::EMISSION_END_HEIGHT, Consensus::EMISSION_TABLE[Consensus::NUM_EMISSION_ERAS - 1].endHeight);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_END_HEIGHT + 1, cp), 0);
-    // Era 0 mints exactly half the cap.
-    BOOST_CHECK_EQUAL(CAmount{14 * COIN} * Consensus::EMISSION_ERA_BLOCKS, Consensus::MAX_SUPPLY_SAT / 2);
+    BOOST_CHECK(Consensus::EMISSION_CLOSING_DUST_SAT >= 0 && Consensus::EMISSION_CLOSING_DUST_SAT < COIN);
 }
 
-// (c) nothing at 0 and 1, nothing after the end.
+// FINAL (owner decision 2026-09-25): the Annual Tenth. The ONE place the shape is [EMISSION-SHAPE] (this whole case)
+// pinned: 6.25, 12.5 and 25 XID for 20,000 blocks each, 50 XID to block 220,000,
+// then 110,000-block steps whose base falls by a tenth (rounded down to 0.01 XID,
+// never under 1.5 XID), each block paying the lesser of its base and 1/1,100,000
+// of what is not yet scheduled, then a 0.1 XID tail: 65 rows, the last subsidy
+// block (35,375,353) also minting the 0.0166 XID remainder. The case re-derives
+// the table from charter section 4's rules, checks the digest section 4 states
+// for it, and pins the owner's test vectors, so the words and the table cannot
+// drift apart.
+namespace {
+//! Charter section 4, (a) to (d), in whole-number arithmetic: rows (first, last, sat), merged.
+std::vector<Consensus::EmissionEra> AnnualTenthFromCharterWords(CAmount& dust)
+{
+    const CAmount cap{Consensus::MAX_SUPPLY_SAT};
+    std::vector<Consensus::EmissionEra> steps{{1, 20'000, 625'000'000}, {20'001, 40'000, 1'250'000'000}, {40'001, 60'000, 2'500'000'000}, {60'001, 220'000, 5'000'000'000}};
+    CAmount scheduled{0};
+    for (const auto& e : steps) scheduled += CAmount{e.endHeight - e.startHeight + 1} * e.baseSubsidy;
+    int64_t n{5'000}; // the base in hundredths of an XID
+    bool tail{false};
+    for (int s{2};; ++s) {
+        const int first{110'000 * s + 1};
+        CAmount r;
+        if (!tail) {
+            n = std::max<int64_t>(n - n / 10, 150);
+            r = std::min<CAmount>(n * (COIN / 100), (cap - scheduled) / 1'100'000);
+            if (r < COIN / 10) tail = true;
+        }
+        if (tail) {
+            r = COIN / 10;
+            const int64_t k{(cap - scheduled) / r};
+            if (k <= 110'000) {
+                steps.push_back({first, first + int(k) - 1, r});
+                scheduled += k * r;
+                break;
+            }
+        }
+        steps.push_back({first, first + 109'999, r});
+        scheduled += 110'000 * r;
+    }
+    dust = cap - scheduled;
+    std::vector<Consensus::EmissionEra> rows;
+    for (const auto& e : steps) {
+        if (!rows.empty() && rows.back().baseSubsidy == e.baseSubsidy) rows.back().endHeight = e.endHeight;
+        else rows.push_back(e);
+    }
+    return rows;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(annual_tenth_emission_shape)
+{
+    const auto params{CreateChainParams(*m_node.args, ChainType::MAIN)};
+    const auto& cp{params->GetConsensus()};
+    BOOST_CHECK(Consensus::EMISSION_SHAPE_IS_FINAL); // the policy status is FINAL
+    BOOST_CHECK_EQUAL(Consensus::NUM_EMISSION_ERAS, 65);
+
+    // The table is what charter section 4's words produce, row for row.
+    CAmount dust{-1};
+    const auto derived{AnnualTenthFromCharterWords(dust)};
+    BOOST_REQUIRE_EQUAL(derived.size(), size_t(Consensus::NUM_EMISSION_ERAS));
+    std::string rows_text;
+    for (int i = 0; i < Consensus::NUM_EMISSION_ERAS; ++i) {
+        const auto& era{Consensus::EMISSION_TABLE[i]};
+        BOOST_CHECK_EQUAL(era.startHeight, derived[i].startHeight);
+        BOOST_CHECK_EQUAL(era.endHeight, derived[i].endHeight);
+        BOOST_CHECK_EQUAL(era.baseSubsidy, derived[i].baseSubsidy);
+        rows_text += strprintf("%d %d %d\n", era.startHeight, era.endHeight, era.baseSubsidy);
+    }
+    BOOST_CHECK_EQUAL(dust, Consensus::EMISSION_CLOSING_DUST_SAT);
+    rows_text += strprintf("dust %d\n", Consensus::EMISSION_CLOSING_DUST_SAT);
+    // The digest section 4 states for the table (the emission lab's canonical rows file).
+    const std::string rows_hash{"356de0dce26aa5e5b9481c3936ecdefb1f81d14dd5e2ca2a43cc7b2775d0a230"};
+    uint8_t digest[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(UCharCast(rows_text.data()), rows_text.size()).Finalize(digest);
+    BOOST_CHECK_EQUAL(HexStr(digest), rows_hash);
+
+    // The owner's test vectors (height -> sat).
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, cp), CAmount{625'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(20'001, cp), CAmount{1'250'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(40'001, cp), CAmount{2'500'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(60'001, cp), CAmount{5'000'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(220'001, cp), CAmount{4'500'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(330'001, cp), CAmount{4'050'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(3'850'001, cp), CAmount{150'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(31'460'001, cp), CAmount{148'490'909});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(34'320'001, cp), CAmount{10'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(35'375'353, cp), CAmount{11'660'000}); // 0.1 XID + the 0.0166 XID remainder
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(35'375'354, cp), 0);
+    BOOST_CHECK_EQUAL(Consensus::EMISSION_END_HEIGHT, 35'375'353);
+    BOOST_CHECK_EQUAL(Consensus::EMISSION_CLOSING_DUST_SAT, CAmount{1'660'000});
+    // Boundaries around the vectors.
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(220'000, cp), 50 * COIN);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(31'460'000, cp), CAmount{150'000'000});
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(35'375'352, cp), CAmount{10'000'000});
+
+    // No row is under the 10,000-sat output floor: the smallest pays 0.1 XID.
+    for (const auto& era : Consensus::EMISSION_TABLE) BOOST_CHECK(era.baseSubsidy >= Consensus::MIN_OUTPUT_VALUE_SAT);
+
+    // Charter section 4 states the rules in words, with no PROVISIONAL marker and no founder lock.
+    const std::string_view text{charter::Text()};
+    BOOST_CHECK(text.find("PROVISIONAL") == std::string_view::npos);
+    BOOST_CHECK(text.find("Rewards are counted in steps of 110,000 blocks") != std::string_view::npos);
+    BOOST_CHECK(text.find("blocks 60,001 to 220,000 pay 50 XID") != std::string_view::npos);
+    BOOST_CHECK(text.find("the next base is the larger of n - floor(n/10) and 150") != std::string_view::npos);
+    BOOST_CHECK(text.find("one 1,100,000th of the XID not yet scheduled") != std::string_view::npos);
+    BOOST_CHECK(text.find("every block pays 0.1 XID until less than 0.1 XID is left unscheduled") != std::string_view::npos);
+    BOOST_CHECK(text.find(rows_hash) != std::string_view::npos);
+    BOOST_CHECK(text.find("block 31,460,001, the first block these rules pay less than 1.5 XID") != std::string_view::npos);
+    BOOST_CHECK(text.find("The schedule is never changed.") != std::string_view::npos);
+}
+
+// The charter carries its PROVISIONAL comment exactly while the generated table says
+// the shape is not final (Consensus::EMISSION_SHAPE_IS_FINAL, from the policy status),
+// and a final mainnet genesis needs a final shape outside a local rehearsal build
+// (the static_assert in kernel/chainparams.cpp; restated here). xcoin-genesis refuses
+// -chain=main on the same condition without -allowprovisional.
+BOOST_AUTO_TEST_CASE(emission_shape_finality_matches_charter)
+{
+    const std::string_view text{charter::Text()};
+    const bool charter_provisional{text.find("PROVISIONAL") != std::string_view::npos};
+    BOOST_CHECK_EQUAL(charter_provisional, !Consensus::EMISSION_SHAPE_IS_FINAL);
+    const auto main{CreateChainParams(*m_node.args, ChainType::MAIN)};
+    if (main->GenesisIsFinal() && !IS_REHEARSAL_BUILD) {
+        BOOST_CHECK(Consensus::EMISSION_SHAPE_IS_FINAL);
+        BOOST_CHECK(!charter_provisional);
+    }
+}
+
+// (c) nothing at height 0, nothing after the end (block 1 pays the first row).
 BOOST_AUTO_TEST_CASE(subsidy_zero_outside_schedule)
 {
     const auto params{CreateChainParams(*m_node.args, ChainType::MAIN)};
     const auto& cp{params->GetConsensus()};
     BOOST_CHECK_EQUAL(GetBlockSubsidy(0, cp), 0);
     // No chain carries anything in or has a block-1 distribution (35c4fda,
-    // 7263c5d), so block 1 is an ordinary era-0 block and pays the era subsidy:
-    // 14 XCF here, 50 XCF on regtest (emission_sums_to_cap_regtest).
+    // 7263c5d), so block 1 is an ordinary first-row block and pays that row's
+    // subsidy (50 XID on regtest, emission_sums_to_cap_regtest; the mainnet
+    // figure is pinned in annual_tenth_emission_shape).
     BOOST_CHECK_EQUAL(GetBlockSubsidy(1, cp), Consensus::EMISSION_TABLE[0].baseSubsidy);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, cp), 14 * COIN);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_END_HEIGHT + 1, cp), 0);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_END_HEIGHT + 1000, cp), 0);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(std::numeric_limits<int>::max(), cp), 0);
@@ -219,7 +366,7 @@ BOOST_AUTO_TEST_CASE(subsidy_zero_outside_schedule)
     // limit falls through to the ordinary era subsidy.
     BOOST_CHECK_EQUAL(GetBlockSubsidy(0, cp), 0);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(1, cp), GetBlockSubsidy(1, cp));
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, cp), 14 * COIN);
+    BOOST_CHECK(GetBlockSubsidy(1, cp) > 0);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(2, cp), GetBlockSubsidy(2, cp));
     BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_END_HEIGHT + 1, cp), 0);
     // A chain without a table pays no subsidy anywhere.
@@ -236,7 +383,10 @@ BOOST_AUTO_TEST_CASE(subsidy_zero_outside_schedule)
 // (9333) and the address HRP (xpa) stay. And a mainnet node built while
 // GENESIS_IS_FINAL is false (the v1 genesis stands in) refuses to start unless
 // -allowunfinalgenesis is given (kernel/chainparams.h,
-// CheckGenesisFinalityForStartup, applied by AppInitParameterInteraction).
+// CheckGenesisFinalityForStartup, applied by AppInitParameterInteraction); so
+// does a testnet A node while TESTNET_GENESIS_IS_FINAL is false (review
+// follow-up: the placeholder was launchable, and a deploy before the re-mine
+// would have opened a new chain on the v1 header).
 BOOST_AUTO_TEST_CASE(mainnet_v2_identity_and_startup_gate)
 {
     const auto main{CreateChainParams(*m_node.args, ChainType::MAIN)};
@@ -269,11 +419,24 @@ BOOST_AUTO_TEST_CASE(mainnet_v2_identity_and_startup_gate)
         BOOST_CHECK(refusal->find(Consensus::V1_GENESIS_HASH.ToString()) != std::string::npos);
         BOOST_CHECK(!CheckGenesisFinalityForStartup(*main, /*allow_unfinal_genesis=*/true));
     }
-    // Testnet A's genesis is final (re-mined 2026-09-14); the startup gate itself
-    // is mainnet-only by design.
-    BOOST_CHECK(testnet->GenesisIsFinal());
-    BOOST_CHECK(testnet->GenesisBlock().GetHash() != Consensus::V1_GENESIS_HASH);
-    BOOST_CHECK(!CheckGenesisFinalityForStartup(*testnet, false));
+    // Testnet A's genesis is final once it is re-mined for the current charter
+    // (kernel/chainparams.cpp, TESTNET_GENESIS_IS_FINAL); until then the v1
+    // placeholder stands in, as for mainnet, and the same gate refuses it.
+    if (testnet->GenesisIsFinal()) {
+        BOOST_CHECK(testnet->GenesisBlock().GetHash() != Consensus::V1_GENESIS_HASH);
+        BOOST_CHECK(!CheckGenesisFinalityForStartup(*testnet, /*allow_unfinal_genesis=*/false));
+    } else {
+        BOOST_CHECK_EQUAL(testnet->GenesisBlock().GetHash(), Consensus::V1_GENESIS_HASH);
+        const std::optional<std::string> refusal{CheckGenesisFinalityForStartup(*testnet, /*allow_unfinal_genesis=*/false)};
+        BOOST_REQUIRE(refusal.has_value());
+        BOOST_CHECK(refusal->find("testnet A") != std::string::npos);
+        BOOST_CHECK(refusal->find("TESTNET_GENESIS_IS_FINAL") != std::string::npos);
+        BOOST_CHECK(refusal->find("-allowunfinalgenesis") != std::string::npos);
+        BOOST_CHECK(refusal->find(Consensus::V1_GENESIS_HASH.ToString()) != std::string::npos);
+        BOOST_CHECK(!CheckGenesisFinalityForStartup(*testnet, /*allow_unfinal_genesis=*/true));
+    }
+    // Regtest has no charter genesis and is never gated.
+    BOOST_CHECK(!regtest->GenesisIsFinal());
     BOOST_CHECK(!CheckGenesisFinalityForStartup(*regtest, false));
     // The unit-test harness itself runs with the override (setup_common.cpp);
     // a real mainnet nexd from this tree exits before any networking.
@@ -503,7 +666,7 @@ BOOST_FIXTURE_TEST_CASE(cap_applies_at_every_height, RegTestingSetup)
 }
 
 namespace {
-/** A transaction spending the fixture's coinbase `n` (50 XCF to the test PQ
+/** A transaction spending the fixture's coinbase `n` (50 XID to the test PQ
  *  key) back to the test key, carrying `data_bytes` of OP_RETURN outputs and
  *  paying `fee`. */
 CMutableTransaction SpendWithData(const TestChain100Setup& setup, size_t n, uint64_t data_bytes, CAmount fee)
@@ -628,7 +791,7 @@ std::span<const unsigned char> Bytes(std::string_view s)
     return {reinterpret_cast<const unsigned char*>(s.data()), s.size()};
 }
 
-constexpr std::string_view CHARTER_HASH_HEX{"415b1dbc7ff2cd14b747b300ecd95862540e12305a801bb2bfed8b93c5d84689"}; // shasum -a 256 contrib/regenesis/CHARTER.md (section 4 rewritten 2026-09-14)
+constexpr std::string_view CHARTER_HASH_HEX{"fd9b475afdbe178864f32802726cc60c27290c09efd472d0934b1c733d3b9340"}; // shasum -a 256 contrib/regenesis/CHARTER.md (2026-09-25: ticker XID, cap 100,000,000 XID, section 4 the Annual Tenth)
 constexpr std::string_view V1_HEADER_SHA256_HEX{"fe5787421dc40ac6a6e8df6b83bc41660df0fc0f22d95fde3d0c32530ae2d16d"};
 } // namespace
 
@@ -652,10 +815,13 @@ BOOST_AUTO_TEST_CASE(charter_hash_matches_file)
         if (nl == std::string_view::npos) break;
         pos = nl + 1;
     }
-    // The charter names its cap. Its lineage is the new genesis (section 3),
-    // not the first chain's, so the v1 hash is deliberately absent.
+    // The charter names its ticker and its cap. Its lineage is the new genesis
+    // (section 3), not the first chain's, so the v1 hash is deliberately absent.
     BOOST_CHECK(text.find(Consensus::V1_GENESIS_HASH.GetHex()) == std::string_view::npos);
-    BOOST_CHECK(text.find("21,000,000 XCF") != std::string_view::npos);
+    BOOST_CHECK(text.find("Its ticker is XID.") != std::string_view::npos);
+    BOOST_CHECK(text.find("There will never be more than 100,000,000 XID.") != std::string_view::npos);
+    BOOST_CHECK(text.find("XCF") == std::string_view::npos); // the retired ticker is gone
+    BOOST_CHECK(text.find("21,000,000") == std::string_view::npos); // and so is the old cap
 
     const charter::Digest recomputed{Sha256Digest(Bytes(text))};
     BOOST_CHECK(charter::TextHash() == recomputed);
@@ -667,9 +833,10 @@ BOOST_AUTO_TEST_CASE(charter_hash_matches_file)
 }
 
 // The v1 genesis header is pinned as raw bytes; its double SHA-256 is the v1
-// block hash and its single SHA-256 is the lineage field of the commitment.
-// Mainnet compiles that header as its placeholder genesis until the v2 genesis
-// is final: identifiable, but unlaunchable (block 1 is refused).
+// block hash and its single SHA-256 identifies it (it is not committed anywhere:
+// the charter output has no lineage field since 35c4fda). Mainnet compiles that
+// header as its placeholder genesis until the v2 genesis is final: identifiable,
+// and refused at startup (CheckGenesisFinalityForStartup) without -allowunfinalgenesis.
 BOOST_AUTO_TEST_CASE(v1_genesis_header_pinned)
 {
     const CBlockHeader v1{charter::V1GenesisHeader()};
@@ -685,20 +852,27 @@ BOOST_AUTO_TEST_CASE(v1_genesis_header_pinned)
     BOOST_CHECK(charter::HeaderSha256(v1) == charter::V1GenesisHeaderSha256());
     BOOST_CHECK(charter::HeaderSha256(v1) == Sha256Digest(Consensus::V1_GENESIS_HEADER));
 
+    // Mainnet, in whichever state the tree is in: the v1 placeholder until cutover
+    // step 3, the pasted charter genesis after it (also in the local rehearsal
+    // build). Asserting only the placeholder would make "test_bitcoin green" at
+    // the ceremony impossible, as it did for the startup gate test (8149ef8).
     const auto main{CreateChainParams(*m_node.args, ChainType::MAIN)};
-    BOOST_CHECK(!main->GenesisIsFinal());
-    BOOST_CHECK_EQUAL(main->GenesisBlock().GetHash(), Consensus::V1_GENESIS_HASH);
-    BOOST_CHECK_EQUAL(main->GetConsensus().hashGenesisBlock, Consensus::V1_GENESIS_HASH);
-    BOOST_CHECK(HeaderBytes(main->GenesisBlock()) == HeaderBytes(v1));
-    BOOST_CHECK(!charter::HasCommitment(*main->GenesisBlock().vtx[0]));
-    BOOST_CHECK_EQUAL(main->GetConsensus().metaldagBaseTime, 1788220800);
-    // Only testnet A has a final (charter-committing) genesis so far
-    // (regenesis_testnet_a_tests); mainnet's is still the v1 placeholder.
-    for (const ChainType type : {ChainType::MAIN, ChainType::REGTEST}) {
-        const auto p{CreateChainParams(*m_node.args, type)};
-        BOOST_CHECK_MESSAGE(!p->GenesisIsFinal(), ChainTypeToString(type) + " claims a final genesis");
-        BOOST_CHECK_MESSAGE(!charter::HasCommitment(*p->GenesisBlock().vtx[0]), ChainTypeToString(type) + " genesis carries a charter output");
+    if (main->GenesisIsFinal()) {
+        BOOST_CHECK(main->GenesisBlock().GetHash() != Consensus::V1_GENESIS_HASH);
+        BOOST_CHECK(charter::HasCommitment(*main->GenesisBlock().vtx[0]));
+        BOOST_CHECK_EQUAL(main->GetConsensus().metaldagBaseTime, main->GenesisBlock().nTime);
+    } else {
+        BOOST_CHECK_EQUAL(main->GenesisBlock().GetHash(), Consensus::V1_GENESIS_HASH);
+        BOOST_CHECK_EQUAL(main->GetConsensus().hashGenesisBlock, Consensus::V1_GENESIS_HASH);
+        BOOST_CHECK(HeaderBytes(main->GenesisBlock()) == HeaderBytes(v1));
+        BOOST_CHECK(!charter::HasCommitment(*main->GenesisBlock().vtx[0]));
+        BOOST_CHECK_EQUAL(main->GetConsensus().metaldagBaseTime, 1788220800);
     }
+    // Regtest never commits to the charter. Testnet A's state is checked in
+    // regenesis_testnet_a_tests.
+    const auto regtest{CreateChainParams(*m_node.args, ChainType::REGTEST)};
+    BOOST_CHECK(!regtest->GenesisIsFinal());
+    BOOST_CHECK(!charter::HasCommitment(*regtest->GenesisBlock().vtx[0]));
 }
 
 // OP_RETURN <"XCOIN/charter/1" || CHARTER_HASH>: 47 bytes of payload, a 49-byte
@@ -712,7 +886,8 @@ BOOST_AUTO_TEST_CASE(charter_commitment_output)
     BOOST_REQUIRE_EQUAL(payload.size(), 47U);
     BOOST_CHECK_EQUAL(std::string(payload.begin(), payload.begin() + 15), "XCOIN/charter/1");
     BOOST_CHECK_EQUAL(std::string(payload.begin(), payload.begin() + 15), Consensus::CHARTER_COMMITMENT_TAG);
-    BOOST_CHECK(std::string(payload.begin(), payload.begin() + 15).find("XCF") == std::string::npos); // never the ticker
+    BOOST_CHECK(std::string(payload.begin(), payload.begin() + 15).find("XID") == std::string::npos); // never the ticker
+    BOOST_CHECK(std::string(payload.begin(), payload.begin() + 15).find("XCF") == std::string::npos); // nor a retired one
     BOOST_CHECK(std::equal(payload.begin() + 15, payload.end(), Consensus::CHARTER_HASH.begin(), Consensus::CHARTER_HASH.end()));
     BOOST_CHECK_EQUAL(HexStr(payload), "58434f494e2f636861727465722f31" + std::string{CHARTER_HASH_HEX});
 
@@ -750,8 +925,9 @@ BOOST_AUTO_TEST_CASE(charter_genesis_block)
     // No numeral (this is the genesis, not a second one), the supply in its
     // smallest unit, and no charter hash (the coinbase output carries all 32 bytes).
     const std::string message{charter::GenesisMessage("2026-10-01")};
-    BOOST_CHECK_EQUAL(message, "Hic experimentum prosperat - 2026-10-01 - 2,100,000,000,000,000 sats, 21M XCF");
-    BOOST_CHECK_EQUAL(message.size(), 77U);
+    BOOST_CHECK_EQUAL(message, "Hic experimentum prosperat - 2026-10-01 - 10,000,000,000,000,000 sats, 100M XID");
+    BOOST_CHECK_EQUAL(message.size(), 79U);
+    BOOST_CHECK_EQUAL(charter::GenesisMessage("2026-11-01"), "Hic experimentum prosperat - 2026-11-01 - 10,000,000,000,000,000 sats, 100M XID"); // the mainnet launch date
     BOOST_CHECK(message.find(std::string{CHARTER_HASH_HEX.substr(0, 16)}) == std::string::npos);
 
     const CBlock g{charter::CreateGenesisBlock(message, 1790000000, 7, 0x1e0fffff, 1)};
@@ -771,7 +947,7 @@ BOOST_AUTO_TEST_CASE(charter_genesis_block)
     BOOST_CHECK(CheckTransaction(cb, state, /*permit_v2_outputs=*/true));
     // ...which is why the message carries 16 hex characters of the charter hash and not 64:
     // with the full digest the scriptSig is 143 bytes and every node would refuse its own genesis.
-    const CBlock too_long{charter::CreateGenesisBlock("Hic experimentum prosperat II - 2026-10-01 - 21,000,000 XCF - charter " + charter::DigestHex(Consensus::CHARTER_HASH),
+    const CBlock too_long{charter::CreateGenesisBlock("Hic experimentum prosperat II - 2026-10-01 - 100,000,000 XID - charter " + charter::DigestHex(Consensus::CHARTER_HASH),
                                                       1790000000, 7, 0x1e0fffff, 1)};
     TxValidationState long_state;
     BOOST_CHECK(!CheckTransaction(*too_long.vtx[0], long_state, /*permit_v2_outputs=*/true));
@@ -797,8 +973,9 @@ BOOST_AUTO_TEST_CASE(charter_genesis_block)
     BOOST_CHECK(id != charter::CurrencyId(charter::CreateGenesisBlock(message, 1790000000, 8, 0x1e0fffff, 1)));
     // The id the RPC reports while the v1 placeholder stands in (not to be attested).
     // It is SHA-256(v1 header || charter text), so it moves with every charter edit;
-    // re-pinned 2026-09-14 for charter 415b1dbc... (section 4: the 14 XCF schedule).
-    BOOST_CHECK_EQUAL(charter::DigestHex(charter::CurrencyId(charter::V1GenesisHeader())), "53a3c8998b634b1960bc2de712c474f063e5b728c19cab8fc338b597dd1b9559");
+    // re-pinned 2026-09-25 for charter fd9b475a... (ticker XID, 100,000,000 XID cap,
+    // section 4 the Annual Tenth).
+    BOOST_CHECK_EQUAL(charter::DigestHex(charter::CurrencyId(charter::V1GenesisHeader())), "ae0a4068b73980de4f5510d44b5a3a63753efb849e29183dd0cd1aefa88548fa");
 }
 
 // The mining path xcoin-genesis uses, in-process on regtest's 1 MiB DAG:
@@ -851,7 +1028,7 @@ BOOST_FIXTURE_TEST_CASE(getcharter_rpc, TestingSetup)
     BOOST_CHECK_EQUAL(result.find_value("currency_id").get_str(), charter::DigestHex(charter::CurrencyId(Params().GenesisBlock())));
     BOOST_CHECK_EQUAL(result.find_value("genesis_hash").get_str(), Params().GenesisBlock().GetHash().GetHex());
     BOOST_CHECK_EQUAL(result.find_value("v1_genesis_hash").get_str(), Consensus::V1_GENESIS_HASH.GetHex());
-    BOOST_CHECK_EQUAL(result.find_value("genesis_is_final").get_bool(), false);
+    BOOST_CHECK_EQUAL(result.find_value("genesis_is_final").get_bool(), Params().GenesisIsFinal());
 }
 
 // Addresses on the v3-only chains (REGENESIS.md sections 3 and 4): mainnet and the
@@ -934,10 +1111,10 @@ BOOST_AUTO_TEST_CASE(coinbase_maturity_by_chain)
     CCoinsView dummy;
     CCoinsViewCache view{&dummy};
     const COutPoint prevout{Txid::FromUint256(uint256::ONE), 0};
-    view.AddCoin(prevout, Coin{CTxOut{14 * COIN, GetTestPQScript()}, /*nHeightIn=*/1, /*fCoinBaseIn=*/true}, false);
+    view.AddCoin(prevout, Coin{CTxOut{50 * COIN, GetTestPQScript()}, /*nHeightIn=*/1, /*fCoinBaseIn=*/true}, false);
     CMutableTransaction tx;
     tx.vin.emplace_back(prevout);
-    tx.vout.emplace_back(14 * COIN - 10'000, GetTestPQScript());
+    tx.vout.emplace_back(50 * COIN - 10'000, GetTestPQScript());
     const auto check{[&](int spend_height) {
         TxValidationState state;
         CAmount fee{0};
@@ -1013,7 +1190,7 @@ BOOST_AUTO_TEST_CASE(v3_only_output_rule_by_chain)
 // disables it so the shared fixtures still build sub-floor outputs. A PQ output
 // costs ~5.4 kB of witness to spend, so anything smaller can never be spent for
 // less than it is worth and exists only to bloat the UTXO set. The floor is the
-// levy floor: 10,000 sat = 0.0001 XCF.
+// levy floor: 10,000 sat = 0.0001 XID.
 BOOST_AUTO_TEST_CASE(min_output_value_rule)
 {
     BOOST_CHECK_EQUAL(Consensus::MIN_OUTPUT_VALUE_SAT, 10'000);
@@ -1075,26 +1252,40 @@ BOOST_AUTO_TEST_CASE(min_output_value_coinbase_exemption)
         return ok ? std::string{"valid"} : state.GetRejectReason();
     }};
 
-    const int era18{13'500'001};
-    BOOST_REQUIRE_EQUAL(GetBlockSubsidy(era18, cp), 5'340);
-    BOOST_CHECK(coinbase(era18, {5'340}).IsCoinBase());
+    // A subsidy under the floor, at a height that pays one if the table has such a
+    // row (the final shape has none: its smallest row pays 0.1 XID, so the test [EMISSION-SHAPE]
+    // uses half the floor at the last subsidy height; the check is context-free, so
+    // any height and any sub-floor value exercise the same rule).
+    int low_height{Consensus::EMISSION_END_HEIGHT};
+    CAmount low{floor / 2};
+    for (const auto& era : Consensus::EMISSION_TABLE) {
+        if (era.baseSubsidy < floor) {
+            low_height = era.startHeight;
+            low = era.baseSubsidy;
+            break;
+        }
+    }
+    BOOST_REQUIRE(low >= 2 && low < floor);
+    const CAmount s1{GetBlockSubsidy(1, cp)};
+    BOOST_REQUIRE(s1 >= 2 * floor);
+    BOOST_CHECK(coinbase(low_height, {low}).IsCoinBase());
     // One spendable output: exempt, whatever it pays from 1 sat up.
-    BOOST_CHECK_EQUAL(check(coinbase(era18, {5'340})), "valid");
-    BOOST_CHECK_EQUAL(check(coinbase(era18, {5'340}, /*with_commitment=*/false)), "valid");
-    BOOST_CHECK_EQUAL(check(coinbase(era18, {1})), "valid");
-    BOOST_CHECK_EQUAL(check(coinbase(1, {14 * COIN})), "valid");
+    BOOST_CHECK_EQUAL(check(coinbase(low_height, {low})), "valid");
+    BOOST_CHECK_EQUAL(check(coinbase(low_height, {low}, /*with_commitment=*/false)), "valid");
+    BOOST_CHECK_EQUAL(check(coinbase(low_height, {1})), "valid");
+    BOOST_CHECK_EQUAL(check(coinbase(1, {s1})), "valid");
     // A zero-value spendable output is bloat with nothing behind it: never allowed.
-    BOOST_CHECK_EQUAL(check(coinbase(era18, {0})), "bad-txout-below-min");
+    BOOST_CHECK_EQUAL(check(coinbase(low_height, {0})), "bad-txout-below-min");
     // Two spendable outputs: the floor applies to every one of them.
-    BOOST_CHECK_EQUAL(check(coinbase(era18, {5'340, 10'000})), "bad-txout-below-min");
-    BOOST_CHECK_EQUAL(check(coinbase(era18, {10'000, 5'340})), "bad-txout-below-min");
-    BOOST_CHECK_EQUAL(check(coinbase(era18, {2'670, 2'670})), "bad-txout-below-min");
-    BOOST_CHECK_EQUAL(check(coinbase(1, {7 * COIN, 7 * COIN})), "valid");
-    BOOST_CHECK_EQUAL(check(coinbase(1, {14 * COIN - 10'000, 10'000})), "valid");
-    BOOST_CHECK_EQUAL(check(coinbase(1, {14 * COIN - 9'999, 9'999})), "bad-txout-below-min");
+    BOOST_CHECK_EQUAL(check(coinbase(low_height, {low, 10'000})), "bad-txout-below-min");
+    BOOST_CHECK_EQUAL(check(coinbase(low_height, {10'000, low})), "bad-txout-below-min");
+    BOOST_CHECK_EQUAL(check(coinbase(low_height, {low / 2, low - low / 2})), "bad-txout-below-min");
+    BOOST_CHECK_EQUAL(check(coinbase(1, {s1 / 2, s1 - s1 / 2})), "valid");
+    BOOST_CHECK_EQUAL(check(coinbase(1, {s1 - 10'000, 10'000})), "valid");
+    BOOST_CHECK_EQUAL(check(coinbase(1, {s1 - 9'999, 9'999})), "bad-txout-below-min");
     // Extra OP_RETURN outputs do not turn a single-output coinbase into a multi-output one.
     {
-        CMutableTransaction tx{coinbase(era18, {5'340})};
+        CMutableTransaction tx{coinbase(low_height, {low})};
         tx.vout.push_back(NullDataOut());
         tx.vout.push_back(NullDataOut());
         BOOST_CHECK_EQUAL(check(CTransaction{tx}), "valid");
@@ -1113,29 +1304,26 @@ BOOST_AUTO_TEST_CASE(min_output_value_coinbase_exemption)
     // The floor being disabled (regtest) still accepts everything, coinbase or not.
     {
         TxValidationState state;
-        BOOST_CHECK(CheckTransaction(coinbase(era18, {0, 0}), state, /*permit_v2_outputs=*/true, /*min_output_value=*/0));
+        BOOST_CHECK(CheckTransaction(coinbase(low_height, {0, 0}), state, /*permit_v2_outputs=*/true, /*min_output_value=*/0));
     }
 
     // Through the emission table: at every era, first and last block, a
     // single-output coinbase paying exactly GetBlockSubsidy(height) — plus, on the
     // final block, the closing remainder, which GetBlockSubsidy already includes —
-    // passes the context-free check. Eras 0-17 pay over the floor; eras 18-30 rely
-    // on the exemption, era 30 paying one satoshi.
-    int eras_under_floor{0};
+    // passes the context-free check, whether the era pays over the floor or relies
+    // on the exemption (annual_tenth_emission_shape pins that the final table has none under it).
     for (int i = 0; i < Consensus::NUM_EMISSION_ERAS; ++i) {
         const auto& era{Consensus::EMISSION_TABLE[i]};
         for (const int height : {era.startHeight, era.startHeight + 1, era.endHeight - 1, era.endHeight}) {
+            if (height < era.startHeight || height > era.endHeight) continue;
             const CAmount subsidy{GetBlockSubsidy(height, cp)};
             BOOST_REQUIRE_GE(subsidy, 1);
             BOOST_CHECK_MESSAGE(check(coinbase(height, {subsidy})) == "valid", strprintf("era %d height %d subsidy %d", i, height, subsidy));
         }
-        if (era.baseSubsidy < floor) ++eras_under_floor;
     }
-    BOOST_CHECK_EQUAL(eras_under_floor, 13); // eras 18..30
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_TABLE[17].baseSubsidy, 10'681); // era 17: the last era over the floor
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_TABLE[18].baseSubsidy, 5'340);  // era 18: the first under it
-    BOOST_CHECK_EQUAL(check(coinbase(Consensus::EMISSION_END_HEIGHT, {1 + Consensus::EMISSION_CLOSING_DUST_SAT})), "valid");
-    BOOST_CHECK_EQUAL(check(coinbase(Consensus::EMISSION_END_HEIGHT - 1, {1})), "valid");
+    const auto& last_era{Consensus::EMISSION_TABLE[Consensus::NUM_EMISSION_ERAS - 1]};
+    BOOST_CHECK_EQUAL(check(coinbase(Consensus::EMISSION_END_HEIGHT, {last_era.baseSubsidy + Consensus::EMISSION_CLOSING_DUST_SAT})), "valid");
+    BOOST_CHECK_EQUAL(check(coinbase(Consensus::EMISSION_END_HEIGHT - 1, {GetBlockSubsidy(Consensus::EMISSION_END_HEIGHT - 1, cp)})), "valid");
     // After emission ends a fee-less block has nothing to pay, and a zero-value
     // spendable output stays refused as it was before the exemption.
     BOOST_CHECK_EQUAL(check(coinbase(Consensus::EMISSION_END_HEIGHT + 1, {0})), "bad-txout-below-min");
@@ -1171,7 +1359,10 @@ BOOST_AUTO_TEST_SUITE_END()
 // list) for the node that assembles block 1.
 
 namespace {
-constexpr std::string_view TESTNET_A_GENESIS_HASH_HEX{"1dc4131ed2649a4782fbb8b25423e970084c7d217f730651d93cf09f6a43ccb9"}; // re-mined 2026-09-14 against charter 415b1dbc... (14 XCF schedule)
+// The pins below are the RETIRED 2026-09-14 genesis (charter 415b1dbc..., 21,000,000 XCF).
+// They apply only once TESTNET_GENESIS_IS_FINAL is true again; re-pin them to the genesis
+// re-mined for charter fd9b475a... (XID, 100,000,000 XID cap, the Annual Tenth) when it is pasted.
+constexpr std::string_view TESTNET_A_GENESIS_HASH_HEX{"1dc4131ed2649a4782fbb8b25423e970084c7d217f730651d93cf09f6a43ccb9"}; // re-mined 2026-09-14 against charter 415b1dbc... (retired)
 constexpr std::string_view TESTNET_A_POW_HASH_HEX{"000001be7d866cb919cac1221d48de803cc61e6d64c0937efb670523bfa071e6"};
 constexpr std::string_view TESTNET_A_CURRENCY_ID_HEX{"fb9c965c9b2c61d9f1f3471d96a775f764389142b838f63c183913b38b71029e"};
 constexpr std::string_view TESTNET_A_DISTRIBUTION_DIGEST{"915be3971dc0f28e0fef6c79ae4af7d152bf3df6bab018c8a76c2b239542551a"};  // over the CONVERTED v3 outputs, natural order
@@ -1219,10 +1410,11 @@ std::unique_ptr<const CChainParams> ParamsWithArgs(const std::vector<std::string
 BOOST_FIXTURE_TEST_SUITE(regenesis_testnet_a_tests, BasicTestingSetup)
 
 // Identity: magic 'X','T','A',0x02, P2P 19333 / RPC 19432 / datadir testneta, HRP
-// "txa", no seeds; a FINAL charter genesis (the task's message with the first 16
-// hex characters of CHARTER_HASH, the commitment output as the coinbase's only
-// output, nothing minted, hash pinned) whose nonce is a real MetalDAG proof of
-// work at testnet A's own sizing, with metaldagBaseTime = the genesis time.
+// "txa", one DNS seed (node two) and no fixed seeds; a FINAL charter genesis (the
+// task's message with the first 16 hex characters of CHARTER_HASH, the commitment
+// output as the coinbase's only output, nothing minted, hash pinned) whose nonce
+// is a real MetalDAG proof of work at testnet A's own sizing, with
+// metaldagBaseTime = the genesis time.
 BOOST_AUTO_TEST_CASE(testnet_a_identity)
 {
     const auto testnet{CreateChainParams(*m_node.args, ChainType::TESTNET)};
@@ -1235,7 +1427,7 @@ BOOST_AUTO_TEST_CASE(testnet_a_identity)
     BOOST_CHECK_EQUAL(CreateBaseChainParams(ChainType::TESTNET)->RPCPort(), 19432);
     BOOST_CHECK_EQUAL(CreateBaseChainParams(ChainType::TESTNET)->DataDir(), "testneta");
     BOOST_CHECK_EQUAL(testnet->Bech32HRP(), "txa");
-    BOOST_CHECK(testnet->DNSSeeds().empty());
+    BOOST_CHECK(testnet->DNSSeeds() == std::vector<std::string>{"testnet.superknet.com."});
     BOOST_CHECK(testnet->FixedSeeds().empty());
     BOOST_CHECK(testnet->IsTestChain());
     BOOST_CHECK(!testnet->IsMockableChain());
@@ -1298,8 +1490,8 @@ BOOST_AUTO_TEST_CASE(testnet_a_identity)
 
 // Consensus exactly as mainnet: proof-of-work parameters, MetalDAG sizing and
 // cadence (same epoch-0 DAG, so a mainnet miner works on testnet A until
-// mainnet's epoch 1), the emission table (14 XCF from block 1, halved every
-// 750,000 blocks), and no block-1 distribution: nothing is carried in on any
+// mainnet's epoch 1), the emission table (row for row, whatever shape the
+// policy generates), and no block-1 distribution: nothing is carried in on any
 // public chain (35c4fda), no founder output, no premine.
 BOOST_AUTO_TEST_CASE(testnet_a_rules_are_mainnet_rules)
 {
@@ -1339,9 +1531,12 @@ BOOST_AUTO_TEST_CASE(testnet_a_rules_are_mainnet_rules)
     BOOST_CHECK_EQUAL(t.emissionClosingDustSat, m.emissionClosingDustSat);
     BOOST_CHECK_EQUAL(t.EmissionEndHeight(), Consensus::EMISSION_END_HEIGHT);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(0, t), 0);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, t), Consensus::EMISSION_ERA0_SUBSIDY_SAT); // 14 XCF from the first block
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, t), 14 * COIN);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_ERA_BLOCKS + 1, t), 700000000LL); // first halving
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, t), Consensus::EMISSION_TABLE[0].baseSubsidy); // the first row's subsidy from the first block
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(1, t), GetBlockSubsidy(1, m));
+    for (const auto& era : Consensus::EMISSION_TABLE) {
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(era.startHeight, t), GetBlockSubsidy(era.startHeight, m));
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(era.endHeight, t), GetBlockSubsidy(era.endHeight, m));
+    }
     BOOST_CHECK_EQUAL(GetBlockSubsidy(1, t), GetBlockSubsidy(1, t));
 
     BOOST_CHECK_EQUAL(MAX_BLOCK_WEIGHT, 64'000'000U);

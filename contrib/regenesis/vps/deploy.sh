@@ -6,6 +6,14 @@ set -euo pipefail
 VPS="${1:?vps ip}"; MAC="${2:-none}"; KEY="${3:-$HOME/.ssh/id_ed25519_vps}"
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 COMMIT="$(git -C "$REPO" rev-parse --short HEAD)"
+# HEAD is what ships (git archive), so check HEAD, not the working tree. Node two runs testnet A:
+# a commit without testnet A's final genesis must not reach it (bootstrap.sh checks the pinned
+# hash again on the VPS, before it changes anything there).
+HEAD_CHAINPARAMS="$(git -C "$REPO" show HEAD:src/kernel/chainparams.cpp)"
+if ! grep -q '^static constexpr bool TESTNET_GENESIS_IS_FINAL = true;' <<<"$HEAD_CHAINPARAMS"; then
+  echo "REFUSING: TESTNET_GENESIS_IS_FINAL is not true in $COMMIT (testnet A is not re-mined in it); nothing shipped." >&2
+  exit 1
+fi
 TARBALL="$(mktemp -t xcoin-src).tar.gz"
 git -C "$REPO" archive --format=tar.gz --prefix=xcoin-src/ -o "$TARBALL" HEAD
 echo "shipping $COMMIT ($(du -h "$TARBALL" | cut -f1)) to root@$VPS"

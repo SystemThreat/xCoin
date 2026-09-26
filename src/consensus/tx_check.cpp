@@ -49,8 +49,9 @@ bool CheckTransaction(const CTransaction& tx, TxValidationState& state, bool per
     // value and never enters the UTXO set, so it is exempt. 0 disables the rule.
     // Coinbase exemption (founder decision 2026-09-15): a coinbase with EXACTLY ONE
     // output that is not NULL_DATA may pay that output any value from 1 sat up,
-    // so that every era's subsidy is mintable by an otherwise empty block (from
-    // era 18, height 13,500,001, the subsidy of 5,340 sat is under the floor). A
+    // so that every era's subsidy is mintable by an otherwise empty block (late
+    // in a schedule the subsidy may fall under the floor; the final shape never [EMISSION-SHAPE]
+    // does, its smallest row paying 0.1 XID). A
     // coinbase with two or more such outputs is subject to the floor on every one
     // of them: a miner cannot split the reward into sub-floor outputs and spray
     // them into the UTXO set, and a zero-value spendable output is never allowed,

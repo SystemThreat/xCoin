@@ -379,7 +379,8 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                              bool fCountFailure,
                              ConnectionType conn_type,
                              bool use_v2transport,
-                             const std::optional<Proxy>& proxy_override)
+                             const std::optional<Proxy>& proxy_override,
+                             bool hybrid_classical_retry)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
@@ -396,7 +397,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
     }
 
     LogDebug(BCLog::NET, "trying %s connection (%s) to %s, lastseen=%.1fhrs\n",
-        use_v2transport ? "v2" : "v1",
+        use_v2transport ? (hybrid_classical_retry ? "classical v2" : "v2") : "v1",
         ConnectionTypeAsString(conn_type),
         pszDest ? pszDest : addrConnect.ToStringAddrPort(),
         Ticks<HoursDouble>(pszDest ? 0h : Now<NodeSeconds>() - addrConnect.nTime));
@@ -541,6 +542,8 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                                     .i2p_sam_session = std::move(i2p_transient_session),
                                     .recv_flood_size = nReceiveFloodSize,
                                     .use_v2transport = use_v2transport,
+                                    .v2_hybrid_mode = hybrid_classical_retry ? V2HybridMode::OFF : m_v2_hybrid_mode,
+                                    .v2_hybrid_counters = &m_v2_hybrid_counters,
                                 });
         pnode->AddRef();
 
@@ -645,6 +648,7 @@ void CNode::CopyStats(CNodeStats& stats)
         Transport::Info info = m_transport->GetInfo();
         stats.m_transport_type = info.transport_type;
         if (info.session_id) stats.m_session_id = HexStr(*info.session_id);
+        stats.m_transport_hybrid = info.hybrid;
     }
     X(m_permission_flags);
 
@@ -984,7 +988,80 @@ std::vector<uint8_t> GenerateRandomGarbage() noexcept
     return ret;
 }
 
+/** Version packet contents carrying one HX1 record. */
+std::vector<uint8_t> EncodeHybridRecord(uint8_t kind, std::span<const std::byte> body) noexcept
+{
+    std::vector<uint8_t> ret(V2Transport::HYBRID_HEADER_LEN + body.size());
+    std::ranges::copy(V2Transport::HYBRID_TAG, ret.begin());
+    ret[8] = V2Transport::HYBRID_VERSION;
+    ret[9] = kind;
+    WriteLE16(ret.data() + 10, static_cast<uint16_t>(body.size()));
+    std::ranges::copy(MakeUCharSpan(body), ret.begin() + V2Transport::HYBRID_HEADER_LEN);
+    return ret;
+}
+
+std::string_view LocalErrorName(mlkem768::Error error) noexcept
+{
+    switch (error) {
+    case mlkem768::Error::INVALID_ENCAPS_KEY: return "invalid encapsulation key";
+    case mlkem768::Error::INVALID_DECAPS_KEY: return "invalid decapsulation key";
+    case mlkem768::Error::RNG_FAILURE: return "RNG failure";
+    case mlkem768::Error::LIBRARY_FAILURE: return "library failure";
+    } // no default case, so the compiler can warn about missing cases
+    assert(false);
+}
+
 } // namespace
+
+std::string_view V2HybridOutcomeName(V2HybridOutcome outcome)
+{
+    switch (outcome) {
+    case V2HybridOutcome::HYBRID: return "hybrid";
+    case V2HybridOutcome::CLASSICAL: return "classical";
+    case V2HybridOutcome::REFUSED: return "refused";
+    case V2HybridOutcome::BAD_RECORD: return "bad_record";
+    case V2HybridOutcome::STAGE2_FAILED: return "stage2_failed";
+    case V2HybridOutcome::LOCAL_ERROR: return "local_error";
+    case V2HybridOutcome::CLASSICAL_RETRY: return "classical_retry";
+    } // no default case, so the compiler can warn about missing cases
+    assert(false);
+}
+
+std::string_view V2HybridModeName(V2HybridMode mode)
+{
+    switch (mode) {
+    case V2HybridMode::OFF: return "off";
+    case V2HybridMode::PREFER: return "prefer";
+    case V2HybridMode::REQUIRE: return "require";
+    } // no default case, so the compiler can warn about missing cases
+    assert(false);
+}
+
+std::optional<V2HybridMode> ParseV2HybridMode(std::string_view value)
+{
+    if (value == "0") return V2HybridMode::OFF;
+    if (value == "1") return V2HybridMode::PREFER;
+    if (value == "2") return V2HybridMode::REQUIRE;
+    return std::nullopt;
+}
+
+V2Transport::HybridRecord V2Transport::ClassifyHybridRecord(std::span<const uint8_t> contents, uint8_t expected_kind,
+                                                            std::span<const uint8_t>& body) noexcept
+{
+    if (contents.size() < HYBRID_TAG.size() + 1 || !std::ranges::equal(contents.first(HYBRID_TAG.size()), HYBRID_TAG)) {
+        return HybridRecord::NONE;
+    }
+    if (contents[HYBRID_TAG.size()] != HYBRID_VERSION) return HybridRecord::NONE;
+    // From here on the contents carry our tag and version, which unrelated contents match with probability 2^-72.
+    if (contents.size() < HYBRID_HEADER_LEN) return HybridRecord::MALFORMED;
+    const size_t expected_len{expected_kind == HYBRID_KIND_OFFER ? mlkem768::ENCAPS_KEY_SIZE : mlkem768::CIPHERTEXT_SIZE};
+    if (contents[9] != expected_kind || ReadLE16(contents.data() + 10) != expected_len ||
+        contents.size() < HYBRID_HEADER_LEN + expected_len) {
+        return HybridRecord::MALFORMED;
+    }
+    body = contents.subspan(HYBRID_HEADER_LEN, expected_len);
+    return HybridRecord::VALID;
+}
 
 void V2Transport::StartSendingHandshake() noexcept
 {
@@ -998,11 +1075,15 @@ void V2Transport::StartSendingHandshake() noexcept
     // We cannot wipe m_send_garbage as it will still be used as AAD later in the handshake.
 }
 
-V2Transport::V2Transport(NodeId nodeid, bool initiating, const CKey& key, std::span<const std::byte> ent32, std::vector<uint8_t> garbage) noexcept
+V2Transport::V2Transport(NodeId nodeid, bool initiating, const CKey& key, std::span<const std::byte> ent32, std::vector<uint8_t> garbage,
+                         V2HybridMode hybrid_mode, V2HybridKem hybrid_kem, V2HybridCounters* hybrid_counters) noexcept
     : m_cipher{key, ent32},
       m_initiating{initiating},
       m_nodeid{nodeid},
       m_v1_fallback{nodeid},
+      m_hybrid_mode{hybrid_mode},
+      m_hybrid_kem{std::move(hybrid_kem)},
+      m_hybrid_counters{hybrid_counters},
       m_recv_state{initiating ? RecvState::KEY : RecvState::KEY_MAYBE_V1},
       m_send_garbage{std::move(garbage)},
       m_send_state{initiating ? SendState::AWAITING_KEY : SendState::MAYBE_V1}
@@ -1015,9 +1096,9 @@ V2Transport::V2Transport(NodeId nodeid, bool initiating, const CKey& key, std::s
     }
 }
 
-V2Transport::V2Transport(NodeId nodeid, bool initiating) noexcept
+V2Transport::V2Transport(NodeId nodeid, bool initiating, V2HybridMode hybrid_mode, V2HybridCounters* hybrid_counters) noexcept
     : V2Transport{nodeid, initiating, GenerateRandomKey(),
-                  MakeByteSpan(GetRandHash()), GenerateRandomGarbage()} {}
+                  MakeByteSpan(GetRandHash()), GenerateRandomGarbage(), hybrid_mode, V2HybridKem{}, hybrid_counters} {}
 
 void V2Transport::SetReceiveState(RecvState recv_state) noexcept
 {
@@ -1059,6 +1140,9 @@ void V2Transport::SetSendState(SendState send_state) noexcept
         Assume(send_state == SendState::V1 || send_state == SendState::AWAITING_KEY);
         break;
     case SendState::AWAITING_KEY:
+        Assume(send_state == SendState::READY || send_state == SendState::AWAITING_VERSION);
+        break;
+    case SendState::AWAITING_VERSION:
         Assume(send_state == SendState::READY);
         break;
     case SendState::READY:
@@ -1079,7 +1163,7 @@ bool V2Transport::ReceivedMessageComplete() const noexcept
     return m_recv_state == RecvState::APP_READY;
 }
 
-void V2Transport::ProcessReceivedMaybeV1Bytes() noexcept
+bool V2Transport::ProcessReceivedMaybeV1Bytes() noexcept
 {
     AssertLockHeld(m_recv_mutex);
     AssertLockNotHeld(m_send_mutex);
@@ -1099,6 +1183,11 @@ void V2Transport::ProcessReceivedMaybeV1Bytes() noexcept
         SetSendState(SendState::AWAITING_KEY);
         StartSendingHandshake();
     } else if (m_recv_buffer.size() == v1_prefix.size()) {
+        if (m_hybrid_mode == V2HybridMode::REQUIRE) {
+            LogInfo("HX1: refusing inbound v1 connection (-v2hybrid=2), peer=%d\n", m_nodeid);
+            CountHybrid(V2HybridOutcome::REFUSED);
+            return false;
+        }
         // Full match with the v1 prefix, so fall back to v1 behavior.
         LOCK(m_send_mutex);
         std::span<const uint8_t> feedback{m_recv_buffer};
@@ -1115,6 +1204,7 @@ void V2Transport::ProcessReceivedMaybeV1Bytes() noexcept
     } else {
         // We have not received enough to distinguish v1 from v2 yet. Wait until more bytes come.
     }
+    return true;
 }
 
 bool V2Transport::ProcessReceivedKeyBytes() noexcept
@@ -1147,11 +1237,13 @@ bool V2Transport::ProcessReceivedKeyBytes() noexcept
         // Initialize the ciphers.
         EllSwiftPubKey ellswift(MakeByteSpan(m_recv_buffer));
         LOCK(m_send_mutex);
-        m_cipher.Initialize(ellswift, m_initiating);
+        m_cipher.Initialize(ellswift, m_initiating, /*self_decrypt=*/false, m_hybrid_mode);
 
         // Switch receiver state to GARB_GARBTERM.
         SetReceiveState(RecvState::GARB_GARBTERM);
         m_recv_buffer.clear();
+
+        if (m_hybrid_mode != V2HybridMode::OFF) return ProcessHybridKey();
 
         // Switch sender state to READY.
         SetSendState(SendState::READY);
@@ -1175,6 +1267,160 @@ bool V2Transport::ProcessReceivedKeyBytes() noexcept
         // We still have to receive more key bytes.
     }
     return true;
+}
+
+bool V2Transport::ProcessHybridKey() noexcept
+{
+    AssertLockHeld(m_recv_mutex);
+    AssertLockHeld(m_send_mutex);
+    Assume(m_hybrid_mode != V2HybridMode::OFF);
+
+    // A responder generates its key pair first, so that a failure sends nothing more.
+    std::vector<uint8_t> offer;
+    if (!m_initiating) {
+        auto key_pair{m_hybrid_kem.keygen()};
+        if (!key_pair) {
+            LogInfo("HX1: ML-KEM key generation failed (%s), disconnecting peer=%d\n", LocalErrorName(key_pair.error()), m_nodeid);
+            HybridFail(V2HybridOutcome::LOCAL_ERROR);
+            return false;
+        }
+        offer = EncodeHybridRecord(HYBRID_KIND_OFFER, key_pair->ek);
+        m_hybrid_key_pair = std::make_unique<mlkem768::KeyPair>(std::move(*key_pair));
+    }
+
+    SetSendState(SendState::AWAITING_VERSION);
+
+    // Append the garbage terminator to the send buffer.
+    m_send_buffer.resize(m_send_buffer.size() + BIP324Cipher::GARBAGE_TERMINATOR_LEN);
+    std::copy(m_cipher.GetSendGarbageTerminator().begin(),
+              m_cipher.GetSendGarbageTerminator().end(),
+              MakeWritableByteSpan(m_send_buffer).last(BIP324Cipher::GARBAGE_TERMINATOR_LEN).begin());
+
+    // The responder's version packet carries the offer, with the sent garbage as AAD. The initiator's waits for it.
+    if (!m_initiating) {
+        m_send_buffer.resize(m_send_buffer.size() + BIP324Cipher::EXPANSION + offer.size());
+        m_cipher.Encrypt(
+            /*contents=*/MakeByteSpan(offer),
+            /*aad=*/MakeByteSpan(m_send_garbage),
+            /*ignore=*/false,
+            /*output=*/MakeWritableByteSpan(m_send_buffer).last(BIP324Cipher::EXPANSION + offer.size()));
+        ClearShrink(m_send_garbage);
+    }
+    return true;
+}
+
+bool V2Transport::ProcessHybridVersion() noexcept
+{
+    AssertLockHeld(m_recv_mutex);
+    AssertLockNotHeld(m_send_mutex);
+    Assume(m_hybrid_mode != V2HybridMode::OFF && m_hybrid_state == HybridState::PENDING);
+
+    std::span<const uint8_t> body;
+    const HybridRecord record{ClassifyHybridRecord(m_recv_decode_buffer, m_initiating ? HYBRID_KIND_OFFER : HYBRID_KIND_ACCEPT, body)};
+    m_hybrid_tag_seen = record != HybridRecord::NONE;
+
+    // The switch to stage 2 replaces the send ciphers too, which SetMessageToSend() uses under m_send_mutex alone.
+    LOCK(m_send_mutex);
+    switch (record) {
+    case HybridRecord::NONE:
+        if (m_hybrid_mode == V2HybridMode::REQUIRE) {
+            LogInfo("HX1: peer=%d sent no HX1 record, disconnecting (-v2hybrid=2)\n", m_nodeid);
+            HybridFail(V2HybridOutcome::REFUSED);
+            return false;
+        }
+        m_hybrid_state = HybridState::CLASSICAL;
+        m_hybrid_key_pair.reset();
+        m_cipher.DiscardStage2Secret();
+        if (m_initiating) {
+            // Our version packet, as BIP324 sends it, with the sent garbage as AAD.
+            m_send_buffer.resize(m_send_buffer.size() + BIP324Cipher::EXPANSION + VERSION_CONTENTS.size());
+            m_cipher.Encrypt(
+                /*contents=*/VERSION_CONTENTS,
+                /*aad=*/MakeByteSpan(m_send_garbage),
+                /*ignore=*/false,
+                /*output=*/MakeWritableByteSpan(m_send_buffer).last(BIP324Cipher::EXPANSION + VERSION_CONTENTS.size()));
+            ClearShrink(m_send_garbage);
+        }
+        SetSendState(SendState::READY);
+        LogDebug(BCLog::NET, "HX1: peer=%d sent no HX1 record, the session stays classical\n", m_nodeid);
+        CountHybrid(V2HybridOutcome::CLASSICAL);
+        return true;
+    case HybridRecord::MALFORMED:
+        LogInfo("HX1: malformed HX1 record (%u bytes of version packet contents), disconnecting peer=%d\n",
+                m_recv_decode_buffer.size(), m_nodeid);
+        HybridFail(V2HybridOutcome::BAD_RECORD);
+        return false;
+    case HybridRecord::VALID:
+        break;
+    } // no default case, so the compiler can warn about missing cases
+
+    if (m_initiating) {
+        const auto ek{MakeByteSpan(body).first<mlkem768::ENCAPS_KEY_SIZE>()};
+        if (!mlkem768::CheckEncapsKey(ek)) {
+            LogInfo("HX1: the ML-KEM encapsulation key failed the FIPS 203 section 7.2 check, disconnecting peer=%d\n", m_nodeid);
+            HybridFail(V2HybridOutcome::BAD_RECORD);
+            return false;
+        }
+        auto encapsulation{m_hybrid_kem.encaps(ek)};
+        if (!encapsulation) {
+            LogInfo("HX1: ML-KEM encapsulation failed (%s), disconnecting peer=%d\n", LocalErrorName(encapsulation.error()), m_nodeid);
+            HybridFail(V2HybridOutcome::LOCAL_ERROR);
+            return false;
+        }
+        // Our version packet is the last packet under stage-1 keys, with the sent garbage as AAD.
+        const auto accept{EncodeHybridRecord(HYBRID_KIND_ACCEPT, encapsulation->ct)};
+        std::vector<uint8_t> version_packet(BIP324Cipher::EXPANSION + accept.size());
+        m_cipher.Encrypt(MakeByteSpan(accept), MakeByteSpan(m_send_garbage), /*ignore=*/false, MakeWritableByteSpan(version_packet));
+        if (!m_cipher.SwitchToStage2(*encapsulation->shared_secret, encapsulation->ct, ek)) {
+            LogInfo("HX1: the stage-2 switch failed, disconnecting peer=%d\n", m_nodeid);
+            HybridFail(V2HybridOutcome::LOCAL_ERROR);
+            return false;
+        }
+        m_send_buffer.insert(m_send_buffer.end(), version_packet.begin(), version_packet.end());
+        ClearShrink(m_send_garbage);
+        m_hybrid_first_send = true;
+    } else {
+        if (!Assume(m_hybrid_key_pair)) {
+            HybridFail(V2HybridOutcome::LOCAL_ERROR);
+            return false;
+        }
+        const auto ct{MakeByteSpan(body).first<mlkem768::CIPHERTEXT_SIZE>()};
+        auto kem_secret{m_hybrid_kem.decaps(*m_hybrid_key_pair->dk, ct)};
+        if (!kem_secret) {
+            LogInfo("HX1: ML-KEM decapsulation failed (%s), disconnecting peer=%d\n", LocalErrorName(kem_secret.error()), m_nodeid);
+            HybridFail(V2HybridOutcome::LOCAL_ERROR);
+            return false;
+        }
+        const bool switched{m_cipher.SwitchToStage2(**kem_secret, ct, m_hybrid_key_pair->ek)};
+        m_hybrid_key_pair.reset();
+        if (!switched) {
+            LogInfo("HX1: the stage-2 switch failed, disconnecting peer=%d\n", m_nodeid);
+            HybridFail(V2HybridOutcome::LOCAL_ERROR);
+            return false;
+        }
+        // The confirmation packet: an empty decoy, our first stage-2 packet, sent before anything else.
+        m_send_buffer.resize(m_send_buffer.size() + BIP324Cipher::EXPANSION);
+        m_cipher.Encrypt({}, {}, /*ignore=*/true, MakeWritableByteSpan(m_send_buffer).last(BIP324Cipher::EXPANSION));
+    }
+    m_hybrid_state = HybridState::UNCONFIRMED;
+    SetSendState(SendState::READY);
+    return true;
+}
+
+void V2Transport::HybridFail(V2HybridOutcome outcome) noexcept
+{
+    AssertLockHeld(m_recv_mutex);
+    AssertLockHeld(m_send_mutex);
+    m_hybrid_state = HybridState::FAILED;
+    m_hybrid_failure = outcome;
+    m_hybrid_key_pair.reset();
+    m_cipher.DiscardStage2Secret();
+    CountHybrid(outcome);
+}
+
+void V2Transport::CountHybrid(V2HybridOutcome outcome) const noexcept
+{
+    if (m_hybrid_counters) ++(*m_hybrid_counters)[static_cast<size_t>(outcome)];
 }
 
 bool V2Transport::ProcessReceivedGarbageBytes() noexcept
@@ -1207,6 +1453,7 @@ bool V2Transport::ProcessReceivedGarbageBytes() noexcept
 bool V2Transport::ProcessReceivedPacketBytes() noexcept
 {
     AssertLockHeld(m_recv_mutex);
+    AssertLockNotHeld(m_send_mutex);
     Assume(m_recv_state == RecvState::VERSION || m_recv_state == RecvState::APP);
 
     // The maximum permitted contents length for a packet, consisting of:
@@ -1220,6 +1467,17 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
     if (m_recv_buffer.size() == BIP324Cipher::LENGTH_LEN) {
         // Length descriptor received.
         m_recv_len = m_cipher.DecryptLength(MakeByteSpan(m_recv_buffer));
+        if (m_hybrid_mode != V2HybridMode::OFF && m_hybrid_state == HybridState::UNCONFIRMED &&
+            m_recv_len > HYBRID_FIRST_PACKET_MAX_CONTENTS) {
+            // The peer's first stage-2 packet is small, so this length was decrypted with a key the peer does not
+            // have. MAX_CONTENTS_LEN exceeds every 3-byte length and cannot catch it; waiting for the bytes would
+            // stall until the handshake timeout.
+            LogInfo("HX1: the first stage-2 packet claims %u bytes of contents, over the %u-byte limit before key confirmation, disconnecting peer=%d\n",
+                    m_recv_len, HYBRID_FIRST_PACKET_MAX_CONTENTS, m_nodeid);
+            LOCK(m_send_mutex);
+            HybridFail(V2HybridOutcome::STAGE2_FAILED);
+            return false;
+        }
         if (m_recv_len > MAX_CONTENTS_LEN) {
             LogDebug(BCLog::NET, "V2 transport error: packet too large (%u bytes), peer=%d\n", m_recv_len, m_nodeid);
             return false;
@@ -1237,12 +1495,23 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
             /*contents=*/MakeWritableByteSpan(m_recv_decode_buffer));
         if (!ret) {
             LogDebug(BCLog::NET, "V2 transport error: packet decryption failure (%u bytes), peer=%d\n", m_recv_len, m_nodeid);
+            if (m_hybrid_mode != V2HybridMode::OFF && m_hybrid_state == HybridState::UNCONFIRMED) {
+                LogInfo("HX1: the first stage-2 packet did not authenticate, disconnecting peer=%d\n", m_nodeid);
+                LOCK(m_send_mutex);
+                HybridFail(V2HybridOutcome::STAGE2_FAILED);
+            }
             return false;
         }
         // We have decrypted a valid packet with the AAD we expected, so clear the expected AAD.
         ClearShrink(m_recv_aad);
         // Feed the last 4 bytes of the Poly1305 authentication tag (and its timing) into our RNG.
         RandAddEvent(ReadLE32(m_recv_buffer.data() + m_recv_buffer.size() - 4));
+        if (m_hybrid_mode != V2HybridMode::OFF && m_hybrid_state == HybridState::UNCONFIRMED) {
+            // Key confirmation: the peer derived the same stage-2 keys.
+            m_hybrid_state = HybridState::CONFIRMED;
+            LogDebug(BCLog::NET, "HX1: key confirmation, the session is hybrid, peer=%d\n", m_nodeid);
+            CountHybrid(V2HybridOutcome::HYBRID);
+        }
 
         // At this point we have a valid packet decrypted into m_recv_decode_buffer. If it's not a
         // decoy, which we simply ignore, use the current state to decide what to do with it.
@@ -1250,7 +1519,8 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
             switch (m_recv_state) {
             case RecvState::VERSION:
                 // Version message received; transition to application phase. The contents is
-                // ignored, but can be used for future extensions.
+                // ignored, but can be used for future extensions. The HX1 modes use it (XIP-4).
+                if (m_hybrid_mode != V2HybridMode::OFF && !ProcessHybridVersion()) return false;
                 SetReceiveState(RecvState::APP);
                 break;
             case RecvState::APP:
@@ -1380,7 +1650,7 @@ bool V2Transport::ReceivedBytes(std::span<const uint8_t>& msg_bytes) noexcept
         // Process data in the buffer.
         switch (m_recv_state) {
         case RecvState::KEY_MAYBE_V1:
-            ProcessReceivedMaybeV1Bytes();
+            if (!ProcessReceivedMaybeV1Bytes()) return false;
             if (m_recv_state == RecvState::V1) return true;
             break;
 
@@ -1504,9 +1774,16 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
         std::copy(msg.m_type.begin(), msg.m_type.end(), contents.data() + 1);
         std::copy(msg.data.begin(), msg.data.end(), contents.begin() + 1 + CMessageHeader::MESSAGE_TYPE_SIZE);
     }
+    if (m_hybrid_mode != V2HybridMode::OFF && std::exchange(m_hybrid_first_send, false) &&
+        contents.size() > HYBRID_FIRST_PACKET_MAX_CONTENTS) {
+        // Our first stage-2 packet must be small, so an empty decoy goes first.
+        m_send_buffer.resize(BIP324Cipher::EXPANSION);
+        m_cipher.Encrypt({}, {}, /*ignore=*/true, MakeWritableByteSpan(m_send_buffer));
+    }
     // Construct ciphertext in send buffer.
-    m_send_buffer.resize(contents.size() + BIP324Cipher::EXPANSION);
-    m_cipher.Encrypt(MakeByteSpan(contents), {}, false, MakeWritableByteSpan(m_send_buffer));
+    const size_t offset{m_send_buffer.size()};
+    m_send_buffer.resize(offset + contents.size() + BIP324Cipher::EXPANSION);
+    m_cipher.Encrypt(MakeByteSpan(contents), {}, false, MakeWritableByteSpan(m_send_buffer).subspan(offset));
     m_send_type = msg.m_type;
     // Release memory
     ClearShrink(msg.data);
@@ -1556,6 +1833,14 @@ bool V2Transport::ShouldReconnectV1() const noexcept
 {
     AssertLockNotHeld(m_send_mutex);
     AssertLockNotHeld(m_recv_mutex);
+    // Require mode never falls back to v1 (XIP-4).
+    return m_hybrid_mode != V2HybridMode::REQUIRE && V1ReconnectCondition();
+}
+
+bool V2Transport::V1ReconnectCondition() const noexcept
+{
+    AssertLockNotHeld(m_send_mutex);
+    AssertLockNotHeld(m_recv_mutex);
     // Only outgoing connections need reconnection.
     if (!m_initiating) return false;
 
@@ -1588,15 +1873,38 @@ Transport::Info V2Transport::GetInfo() const noexcept
 
     // Do not report v2 and session ID until the version packet has been received
     // and verified (confirming that the other side very likely has the same keys as us).
+    // In an HX1 session that takes the first stage-2 packet from the peer (key confirmation).
+    const bool hybrid_pending{m_hybrid_mode != V2HybridMode::OFF && m_hybrid_state != HybridState::CLASSICAL &&
+                              m_hybrid_state != HybridState::CONFIRMED};
     if (m_recv_state != RecvState::KEY_MAYBE_V1 && m_recv_state != RecvState::KEY &&
-        m_recv_state != RecvState::GARB_GARBTERM && m_recv_state != RecvState::VERSION) {
+        m_recv_state != RecvState::GARB_GARBTERM && m_recv_state != RecvState::VERSION && !hybrid_pending) {
         info.transport_type = TransportProtocolType::V2;
         info.session_id = uint256(MakeUCharSpan(m_cipher.GetSessionID()));
+        info.hybrid = m_hybrid_state == HybridState::CONFIRMED;
     } else {
         info.transport_type = TransportProtocolType::DETECTING;
     }
 
     return info;
+}
+
+Transport::HybridStatus V2Transport::GetHybridStatus() const noexcept
+{
+    AssertLockNotHeld(m_recv_mutex);
+    AssertLockNotHeld(m_send_mutex);
+    if (m_hybrid_mode == V2HybridMode::OFF) return {};
+
+    HybridStatus status;
+    {
+        LOCK(m_recv_mutex);
+        status.unconfirmed = m_hybrid_state == HybridState::UNCONFIRMED;
+        status.retry_classical = m_initiating && m_hybrid_mode == V2HybridMode::PREFER && m_hybrid_tag_seen &&
+                                 m_hybrid_state != HybridState::CONFIRMED &&
+                                 m_hybrid_failure != V2HybridOutcome::LOCAL_ERROR;
+        status.failure = m_hybrid_failure;
+    }
+    status.v1_refused = m_hybrid_mode == V2HybridMode::REQUIRE && V1ReconnectCondition();
+    return status;
 }
 
 std::pair<size_t, bool> CConnman::SocketSendData(CNode& node) const
@@ -1662,6 +1970,7 @@ std::pair<size_t, bool> CConnman::SocketSendData(CNode& node) const
                 int nErr = WSAGetLastError();
                 if (nErr != WSAEWOULDBLOCK && nErr != WSAEMSGSIZE && nErr != WSAEINTR && nErr != WSAEINPROGRESS) {
                     LogDebug(BCLog::NET, "socket send error, %s: %s", node.DisconnectMsg(), NetworkErrorString(nErr));
+                    node.SetHybridCloseCause(CNode::HybridCloseCause::PEER);
                     node.CloseSocketDisconnect();
                 }
             }
@@ -1854,6 +2163,8 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                  .prefer_evict = discouraged,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
+                                 .v2_hybrid_mode = m_v2_hybrid_mode,
+                                 .v2_hybrid_counters = &m_v2_hybrid_counters,
                              });
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, local_services);
@@ -1954,6 +2265,30 @@ void CConnman::DisconnectNodes()
                         .conn_type = pnode->m_conn_type,
                         .use_v2transport = false});
                     LogDebug(BCLog::NET, "retrying with v1 transport protocol for peer=%d\n", pnode->GetId());
+                }
+
+                // HX1 (XIP-4): require mode never falls back to v1, and prefer mode retries a failed hybrid
+                // handshake once as classical v2 unless this node closed the connection itself.
+                const Transport::HybridStatus hybrid{pnode->m_transport->GetHybridStatus()};
+                if (network_active && hybrid.v1_refused) {
+                    LogInfo("HX1: not retrying with v1 transport protocol (-v2hybrid=2), %s", pnode->DisconnectMsg());
+                    CountHybrid(V2HybridOutcome::REFUSED);
+                }
+                const CNode::HybridCloseCause close_cause{pnode->m_hybrid_close_cause.load()};
+                if (network_active && hybrid.retry_classical && close_cause != CNode::HybridCloseCause::NONE) {
+                    const std::string_view cause{hybrid.failure ? V2HybridOutcomeName(*hybrid.failure) :
+                                                 close_cause == CNode::HybridCloseCause::TIMEOUT ? "stage2_failed" :
+                                                                                                   "closed before key confirmation"};
+                    LogInfo("HX1 handshake failed (%s), retrying once as classical v2, %s", cause, pnode->DisconnectMsg());
+                    const bool manual{pnode->m_conn_type == ConnectionType::MANUAL && !pnode->m_dest.empty()};
+                    if (manual) WITH_LOCK(m_v2_hybrid_retry_mutex, m_v2_hybrid_retry_dests.insert(pnode->m_dest));
+                    reconnections_to_add.push_back({
+                        .addr_connect = pnode->addr,
+                        .grant = std::move(pnode->grantOutbound),
+                        .destination = pnode->m_dest,
+                        .conn_type = pnode->m_conn_type,
+                        .use_v2transport = true,
+                        .hybrid_classical_retry = !manual});
                 }
 
                 // release outbound grant (if any)
@@ -2190,6 +2525,7 @@ void CConnman::SocketHandlerConnected(const std::vector<CNode*>& nodes,
                         "receiving message bytes failed, %s",
                         pnode->DisconnectMsg()
                     );
+                    pnode->SetHybridCloseCause(CNode::HybridCloseCause::TRANSPORT);
                     pnode->CloseSocketDisconnect();
                 }
                 RecordBytesRecv(nBytes);
@@ -2204,6 +2540,7 @@ void CConnman::SocketHandlerConnected(const std::vector<CNode*>& nodes,
                 if (!pnode->fDisconnect) {
                     LogDebug(BCLog::NET, "socket closed, %s", pnode->DisconnectMsg());
                 }
+                pnode->SetHybridCloseCause(CNode::HybridCloseCause::PEER);
                 pnode->CloseSocketDisconnect();
             }
             else if (nBytes < 0)
@@ -2215,12 +2552,20 @@ void CConnman::SocketHandlerConnected(const std::vector<CNode*>& nodes,
                     if (!pnode->fDisconnect) {
                         LogDebug(BCLog::NET, "socket recv error, %s: %s", pnode->DisconnectMsg(), NetworkErrorString(nErr));
                     }
+                    pnode->SetHybridCloseCause(CNode::HybridCloseCause::PEER);
                     pnode->CloseSocketDisconnect();
                 }
             }
         }
 
-        if (InactivityCheck(*pnode, now)) pnode->fDisconnect = true;
+        if (InactivityCheck(*pnode, now)) {
+            if (!pnode->fDisconnect && pnode->m_transport->GetHybridStatus().unconfirmed) {
+                LogInfo("HX1: handshake timeout before key confirmation, %s", pnode->DisconnectMsg());
+                CountHybrid(V2HybridOutcome::STAGE2_FAILED);
+                pnode->SetHybridCloseCause(CNode::HybridCloseCause::TIMEOUT);
+            }
+            pnode->fDisconnect = true;
+        }
     }
 }
 
@@ -2892,7 +3237,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
             // network connections (if any) belong in the same netgroup, and the size of `outbound_ipv46_peer_netgroups` would only be 1.
             const bool count_failures{((int)outbound_ipv46_peer_netgroups.size() + outbound_privacy_network_peers) >= std::min(m_max_automatic_connections - 1, 2)};
             // Use BIP324 transport when both us and them have NODE_V2_P2P set.
-            const bool use_v2transport(addrConnect.nServices & GetLocalServices() & NODE_P2P_V2);
+            const bool use_v2transport{UseV2TransportTo(addrConnect.nServices)};
             OpenNetworkConnection(addrConnect, count_failures, std::move(grant), /*pszDest=*/nullptr, conn_type, use_v2transport);
         }
     }
@@ -3008,9 +3353,11 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
                                      const char* pszDest,
                                      ConnectionType conn_type,
                                      bool use_v2transport,
-                                     const std::optional<Proxy>& proxy_override)
+                                     const std::optional<Proxy>& proxy_override,
+                                     bool hybrid_classical_retry)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+    AssertLockNotHeld(m_v2_hybrid_retry_mutex);
     assert(conn_type != ConnectionType::INBOUND);
 
     //
@@ -3031,10 +3378,24 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
         return false;
     }
 
-    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport, proxy_override);
+    // A MANUAL destination marked for the HX1 classical retry gets it from whichever loop opens it next.
+    bool manual_retry{false};
+    if (conn_type == ConnectionType::MANUAL && pszDest && use_v2transport) {
+        LOCK(m_v2_hybrid_retry_mutex);
+        manual_retry = m_v2_hybrid_retry_dests.erase(pszDest) > 0;
+    }
+    const bool classical_retry{hybrid_classical_retry || manual_retry};
 
-    if (!pnode)
+    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport, proxy_override, classical_retry);
+
+    if (!pnode) {
+        if (manual_retry) WITH_LOCK(m_v2_hybrid_retry_mutex, m_v2_hybrid_retry_dests.emplace(pszDest));
         return false;
+    }
+    if (classical_retry) {
+        LogDebug(BCLog::NET, "HX1: classical retry connection opened, peer=%d\n", pnode->GetId());
+        CountHybrid(V2HybridOutcome::CLASSICAL_RETRY);
+    }
     pnode->grantOutbound = std::move(grant_outbound);
 
     m_msgproc->InitializeNode(*pnode, m_local_services);
@@ -3254,7 +3615,7 @@ void CConnman::ThreadPrivateBroadcast()
             target_str += " through the proxy at " + proxy->ToString();
         }
 
-        const bool use_v2transport(addr.nServices & GetLocalServices() & NODE_P2P_V2);
+        const bool use_v2transport{UseV2TransportTo(addr.nServices)};
 
         if (OpenNetworkConnection(addr,
                                   /*fCountFailure=*/true,
@@ -3748,6 +4109,8 @@ bool CConnman::AddNode(const AddedNodeParams& add)
     }
 
     m_added_node_params.push_back(add);
+    // A disconnect processed after an earlier removenode may have marked this destination again.
+    WITH_LOCK(m_v2_hybrid_retry_mutex, m_v2_hybrid_retry_dests.erase(add.m_added_node));
     return true;
 }
 
@@ -3757,10 +4120,19 @@ bool CConnman::RemoveAddedNode(std::string_view node)
     for (auto it = m_added_node_params.begin(); it != m_added_node_params.end(); ++it) {
         if (node == it->m_added_node) {
             m_added_node_params.erase(it);
+            // A later addnode of the same destination must not inherit a stale classical retry.
+            WITH_LOCK(m_v2_hybrid_retry_mutex, m_v2_hybrid_retry_dests.erase(std::string{node}));
             return true;
         }
     }
     return false;
+}
+
+bool CConnman::UseV2TransportTo(ServiceFlags their_services) const
+{
+    // HX1 require mode tries v2 whatever the address advertises, which includes seeds (XIP-4).
+    return (GetLocalServices() & NODE_P2P_V2) &&
+           ((their_services & NODE_P2P_V2) || m_v2_hybrid_mode == V2HybridMode::REQUIRE);
 }
 
 bool CConnman::AddedNodesContain(const CAddress& addr) const
@@ -3964,10 +4336,11 @@ ServiceFlags CConnman::GetLocalServices() const
     return m_local_services;
 }
 
-static std::unique_ptr<Transport> MakeTransport(NodeId id, bool use_v2transport, bool inbound) noexcept
+static std::unique_ptr<Transport> MakeTransport(NodeId id, bool use_v2transport, bool inbound, V2HybridMode hybrid_mode,
+                                                V2HybridCounters* hybrid_counters) noexcept
 {
     if (use_v2transport) {
-        return std::make_unique<V2Transport>(id, /*initiating=*/!inbound);
+        return std::make_unique<V2Transport>(id, /*initiating=*/!inbound, hybrid_mode, hybrid_counters);
     } else {
         return std::make_unique<V1Transport>(id);
     }
@@ -3984,7 +4357,8 @@ CNode::CNode(NodeId idIn,
              bool inbound_onion,
              uint64_t network_key,
              CNodeOptions&& node_opts)
-    : m_transport{MakeTransport(idIn, node_opts.use_v2transport, conn_type_in == ConnectionType::INBOUND)},
+    : m_transport{MakeTransport(idIn, node_opts.use_v2transport, conn_type_in == ConnectionType::INBOUND,
+                                node_opts.v2_hybrid_mode, node_opts.v2_hybrid_counters)},
       m_permission_flags{node_opts.permission_flags},
       m_sock{sock},
       m_connected{GetTime<std::chrono::seconds>()},
@@ -4171,8 +4545,19 @@ void CConnman::PerformReconnections()
                               std::move(item.grant),
                               item.destination.empty() ? nullptr : item.destination.c_str(),
                               item.conn_type,
-                              item.use_v2transport);
+                              item.use_v2transport,
+                              /*proxy_override=*/std::nullopt,
+                              item.hybrid_classical_retry);
     }
+}
+
+std::array<uint64_t, V2_HYBRID_OUTCOMES> CConnman::GetV2HybridCounts() const
+{
+    std::array<uint64_t, V2_HYBRID_OUTCOMES> counts;
+    for (size_t i{0}; i < counts.size(); ++i) {
+        counts[i] = m_v2_hybrid_counters[i].load();
+    }
+    return counts;
 }
 
 void CConnman::ASMapHealthCheck()

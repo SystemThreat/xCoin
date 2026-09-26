@@ -31,7 +31,7 @@ for cmd in "info" "balance --index $INDEX" "utxos --index $INDEX" "history --ind
   "${CLI[@]}" --json $cmd | python3 -m json.tool > /dev/null && echo "  ok: $cmd"
 done
 
-step "dry-run send 1.0 XCF to self (never broadcasts)"
+step "dry-run send 1.0 XID to self (never broadcasts)"
 DEST="$("${CLI[@]}" address --index 0)"
 if "${CLI[@]}" send "$DEST" 1.0 --index "$INDEX" --yes --dry-run; then
   echo "  dry-run signed OK (spendable funds present)"

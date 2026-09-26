@@ -26,6 +26,36 @@ The binaries are `build/bin/nexd`, `nex-cli`, `test_bitcoin` and `xcoin-genesis`
 
 ## 1. Identity
 
+> **Testnet A must be re-mined for the 2026-09-25 charter** (ticker XID, 100,000,000 XID cap,
+> charter `fd9b475a…`, section 4 the Annual Tenth). The genesis values in this table are the retired 2026-09-14 genesis,
+> bound to the 21,000,000 XCF charter; on this branch `TESTNET_GENESIS_IS_FINAL` is false until
+> the re-mine is pasted (the command is in `src/kernel/chainparams.cpp`). Wipe every `testneta`
+> datadir when the new genesis lands.
+>
+> Until then, a node built from this branch **refuses to start** on testnet A (the v1 genesis
+> stands in as a placeholder; `-allowunfinalgenesis=1` overrides it for tests only, never on a
+> node that peers). Started anyway, it would open a new chain on the v1 header, with difficulty
+> anchored at 2026-09-01 (thousands of easiest-difficulty blocks at once) and its seed peers on a
+> different genesis. `vps/deploy.sh` and `vps/bootstrap.sh` refuse a tree whose testnet A genesis
+> is not final or is not the one pinned in `bootstrap.sh`, before anything on node two is
+> replaced, and `bootstrap.sh` stops and disables the unit if the started node reports another
+> genesis. Do not deploy this branch to node two before the re-mine is pasted and pinned.
+>
+> The running testnet A still pays 14 coins per block under the old 21,000,000 rules. Do not point the
+> explorer from this tree at it with its defaults (`XCOIN_MAX_SUPPLY` 100,000,000 and the
+> Annual Tenth `EMISSION_NOTE`); set `XCOIN_MAX_SUPPLY=21000000` or wait for the re-mine.
+>
+> **Scheduling the re-mine.** Mine on an idle machine: the last attempt (2026-09-25, provisional
+> charter) ran at about 720 H/s on a machine at load 20 to 54 and stopped after 453 % of the
+> expected work without a nonce. Pass `-time` up to 2 hours ahead of the clock (`xcoin-genesis`
+> refuses more) so the stamp is not stale by the time a nonce is found, and start the rehearsal
+> nodes right after: every hour between the genesis time and block 1 is about twelve
+> easiest-difficulty blocks. The emission shape changes the charter once more when it is final,
+> so the testnet A genesis that counts is the one mined against the final charter. Working back
+> from November 1: the three quiet days this runbook asks for, after the first
+> spend, which needs 1,000 blocks of coinbase maturity (about 3.5 days), means the final re-mine
+> must be running by about October 24; REHEARSAL-2 needs the same 3.5 days of maturity.
+
 | | rehearsal chain | mainnet (for comparison) |
 |---|---|---|
 | Select | `-testnet` (or `-chain=test`) | default |
@@ -40,12 +70,12 @@ The binaries are `build/bin/nexd`, `nex-cli`, `test_bitcoin` and `xcoin-genesis`
 | Genesis nonce / bits | `166982` / `0x1e0fffff` | TBD |
 | Genesis merkle root | `b49ffb666442033ee8908bd83f4e458e1ccafcb620f844acff6b7dbde727d0f8` | TBD |
 | MetalDAG PoW hash of the genesis | `000003ae512afefde0e58261f26308e2822b3f73f1beb8e67ff448d12c8c78e8` | TBD |
-| Coinbase message | `xCoin testnet A - 2026-09-14 - 2,100,000,000,000,000 sats, 21M XCF` | `Hic experimentum prosperat - <UTC date of -time> - 2,100,000,000,000,000 sats, 21M XCF` (`charter::GenesisMessage`; no numeral — this is the genesis, not a second one — and no charter hex: the full 32-byte hash lives in the coinbase output) |
+| Coinbase message | `xCoin testnet A - <UTC date> - 10,000,000,000,000,000 sats, 100M XID` at the re-mine (the retired genesis carried `xCoin testnet A - 2026-09-14 - 2,100,000,000,000,000 sats, 21M XCF`) | `Hic experimentum prosperat - <UTC date of -time> - 10,000,000,000,000,000 sats, 100M XID` (`charter::GenesisMessage`; no numeral — this is the genesis, not a second one — and no charter hex: the full 32-byte hash lives in the coinbase output) |
 | Charter output | `OP_RETURN "XCOIN/charter/1" ‖ CHARTER_HASH`, the coinbase's only output, value 0 | same |
-| CHARTER_HASH | `415b1dbc7ff2cd14b747b300ecd95862540e12305a801bb2bfed8b93c5d84689` | same |
+| CHARTER_HASH | `fd9b475afdbe178864f32802726cc60c27290c09efd472d0934b1c733d3b9340` (the retired genesis above committed `415b1dbc…`) | same |
 | CURRENCY_ID (`getcharter`) | `fb9c965c9b2c61d9f1f3471d96a775f764389142b838f63c183913b38b71029e` | TBD |
 | `genesis_is_final` | `true` | `false` |
-| Block 1 | an ordinary block: 14 XCF plus fees to whoever mines it. Nothing is carried in, no premine, nothing inscribed | same |
+| Block 1 <!-- [EMISSION-SHAPE] --> | an ordinary block: 6.25 XID (the first row of the Annual Tenth emission table) plus fees to whoever mines it. Nothing is carried in, no premine, nothing inscribed | same |
 | Witness v2 outputs | none, and none can be created: `bad-txout-not-pq` after the genesis block | same |
 | Coinbase maturity | 1,000 blocks (~3.5 days at 300 s) | same |
 | Settlement levy | none at genesis: zero rate, zero cap (machinery dormant; a later soft fork can switch it on) | same |
@@ -53,8 +83,9 @@ The binaries are `build/bin/nexd`, `nex-cli`, `test_bitcoin` and `xcoin-genesis`
 | Checkpoint signers | none; only release checkpoints exist | same |
 
 Consensus that is identical to mainnet (the unit test `regenesis_testnet_a_tests/testnet_a_rules_are_mainnet_rules`
-proves each line): the emission table (14 XCF per block from height 1, halved every 750,000 blocks in
-whole satoshis, 31 eras, closing remainder on the last subsidy block), the 8,000-byte data-carrier
+proves each line): the emission table (row for row; the Annual Tenth: 6.25, 12.5, 25 XID for 20,000 blocks each, 50 XID to <!-- [EMISSION-SHAPE] -->
+block 220,000, then 10% less every 110,000 blocks, 65 rows, closing remainder on the last subsidy block 35,375,353,
+100,000,000 XID in all), the 8,000-byte data-carrier
 budget per block, 4,000,000 WU blocks, 300 s target spacing, anchored ASERT with a 2 h half-life from
 block 1, no min-difficulty blocks, `powLimit` `0x1e0fffff`, MetalDAG at the mainnet sizing (4 GiB
 launch DAG, +128 MiB per 14-day epoch, cache = DAG/128) with epoch 0 starting at the rehearsal genesis
@@ -190,7 +221,7 @@ tail -3 $HOME/.xcoin-rehearsal/node/testneta/debug.log
 
 **Day 1 — that it started right.** Both nodes on `1dc4131e…ccb9`; `getconnectioncount` ≥ 1 on both;
 `getcharter` reporting `currency_id fb9c965c…029e` and `genesis_is_final true`; block 1 in, paying
-**14.00000000 XCF** to your address and nothing else:
+**6.25000000 XID** (the Annual Tenth's first row) to your address and nothing else: <!-- [EMISSION-SHAPE] -->
 
 ```sh
 rcli getblock $(rcli getblockhash 1) 2 | python3 -c "
@@ -198,7 +229,7 @@ import json,sys; print([(o['value'], o['scriptPubKey'].get('address')) for o in 
 ```
 
 **Day 2 — that it keeps going.** The height rising on both nodes and the two `bestblockhash` values
-equal; every block paying 14 XCF plus fees; `getdifficulty` moving as ASERT reacts to the block rate;
+equal; every block to 20,000 paying 6.25 XID plus fees (the Annual Tenth); <!-- [EMISSION-SHAPE] --> `getdifficulty` moving as ASERT reacts to the block rate;
 `~/.xcoin-rehearsal/pool/pool_stats.json` moving; the miner showing accepted shares.
 
 **Day 4 or later — that the money moves.** A coinbase matures after 1,000 blocks, about 3.5 days at

@@ -22,11 +22,11 @@
  * ONE row, at height 0, with a zero rate and a zero cap: no transaction owes a
  * levy today (SETTLEMENT_LEVY_GENESIS_RULE; founder decision 2026-09-14, see
  * consensus/params.h). The arithmetic below is kept live and asserted at the
- * reference rate of 5 bp capped at 0.0001 XCF (SETTLEMENT_LEVY_REFERENCE_RULE),
+ * reference rate of 5 bp capped at 0.0001 XID (SETTLEMENT_LEVY_REFERENCE_RULE),
  * which is what regtest charges under -levybp=5. Integer arithmetic only, rounded up,
  * overflow-free for sums up to MAX_MONEY and rates up to SETTLEMENT_LEVY_BP_MAX
  * (100%): the value is split at the denominator so no product exceeds
- * 2.1e15 * 1e4 / 1e4. The levy is paid to the miner as an ordinary fee; nothing
+ * 1e16 * 1e4 / 1e4 (MAX_MONEY is 10^16 sat). The levy is paid to the miner as an ordinary fee; nothing
  * is burned. Coinbases are exempt (they have no fee); nothing else is. The
  * consensus rule is enforced by Consensus::CheckSettlementLevy (tx_verify.h)
  * in ConnectBlock and in mempool acceptance.
@@ -96,20 +96,20 @@ static_assert(SettlementLevy(10'000, SETTLEMENT_LEVY_REFERENCE_RULE) == 5, "5 bp
 static_assert(SettlementLevy(1, SETTLEMENT_LEVY_REFERENCE_RULE) == 1, "the levy rounds up: 1 sat moved still costs 1 sat");
 static_assert(SettlementLevy(2'000, SETTLEMENT_LEVY_REFERENCE_RULE) == 1 && SettlementLevy(2'001, SETTLEMENT_LEVY_REFERENCE_RULE) == 2, "rounds up at 2,000 sat per satoshi of levy");
 static_assert(SettlementLevyUncapped(MAX_MONEY, SETTLEMENT_LEVY_BP_MAX) == MAX_MONEY, "100% of the cap is representable: the raw arithmetic does not overflow");
-static_assert(SettlementLevyUncapped(MAX_MONEY, SETTLEMENT_LEVY_BP) == 1'050'000'000'000LL, "uncapped, 5 bp of 21M XCF would be 10,500 XCF");
+static_assert(SettlementLevyUncapped(MAX_MONEY, SETTLEMENT_LEVY_BP) == 5'000'000'000'000LL, "uncapped, 5 bp of 100M XID would be 50,000 XID");
 static_assert(SettlementLevy(0, SETTLEMENT_LEVY_REFERENCE_RULE) == 0 && SettlementLevy(10'000, 0, SETTLEMENT_LEVY_CAP_SAT) == 0, "no outputs or no levy: nothing owed");
 static_assert(SettlementLevyFromInputs(10'005, SETTLEMENT_LEVY_REFERENCE_RULE) == 5 && SettlementLevy(10'005 - 5, SETTLEMENT_LEVY_REFERENCE_RULE) == 5, "10,005 sat in: 5 sat fee covers 10,000 sat out");
 static_assert(SETTLEMENT_LEVY_BP >= 0 && SETTLEMENT_LEVY_BP <= SETTLEMENT_LEVY_BP_MAX, "levy in range");
 
-// The reference cap. 0.0001 XCF, whatever the transaction moves.
-static_assert(SETTLEMENT_LEVY_CAP_SAT == 10'000, "the reference cap is 0.0001 XCF");
-static_assert(SettlementLevy(20'000'000, SETTLEMENT_LEVY_REFERENCE_RULE) == 10'000, "0.2 XCF out is exactly at the cap");
+// The reference cap. 0.0001 XID, whatever the transaction moves.
+static_assert(SETTLEMENT_LEVY_CAP_SAT == 10'000, "the reference cap is 0.0001 XID");
+static_assert(SettlementLevy(20'000'000, SETTLEMENT_LEVY_REFERENCE_RULE) == 10'000, "0.2 XID out is exactly at the cap");
 static_assert(SettlementLevy(20'000'001, SETTLEMENT_LEVY_REFERENCE_RULE) == 10'000, "one sat past the crossover is still the cap");
-static_assert(SettlementLevy(1'000'000'000'000LL, SETTLEMENT_LEVY_REFERENCE_RULE) == 10'000, "10,000 XCF out owes the cap, not 5 XCF");
+static_assert(SettlementLevy(1'000'000'000'000LL, SETTLEMENT_LEVY_REFERENCE_RULE) == 10'000, "10,000 XID out owes the cap, not 5 XID");
 static_assert(SettlementLevy(MAX_MONEY, SETTLEMENT_LEVY_REFERENCE_RULE) == 10'000, "moving the whole supply owes the cap");
 static_assert(SettlementLevyFromInputs(MAX_MONEY, SETTLEMENT_LEVY_REFERENCE_RULE) == 10'000, "the wallet-side helper respects the same cap");
 // A raised cap is proportional again above the old crossover: the soft-fork lever works as intended.
-static_assert(SettlementLevy(COIN, SettlementLevyRule{0, SETTLEMENT_LEVY_BP, 100'000}) == 50'000, "under a 0.001 XCF cap, 1 XCF owes the proportional 50,000 sat");
+static_assert(SettlementLevy(COIN, SettlementLevyRule{0, SETTLEMENT_LEVY_BP, 100'000}) == 50'000, "under a 0.001 XID cap, 1 XID owes the proportional 50,000 sat");
 
 } // namespace Consensus
 

@@ -100,8 +100,8 @@ enum class SynchronizationState {
 extern const std::vector<std::string> CHECKLEVEL_DOC;
 
 /** Era subsidy of the block at nHeight (contrib/regenesis/REGENESIS.md section 2):
- *  0 at heights 0 and 1, the table value for heights 2..EmissionEndHeight()
- *  (the closing dust included in the last block), 0 afterwards. */
+ *  0 at height 0 (the genesis mints nothing), the table value from height 1 through
+ *  EmissionEndHeight() (the closing dust included in the last block), 0 afterwards. */
 CAmount GetBlockSubsidy(int nHeight, const Consensus::Params& consensusParams);
 
 bool FatalError(kernel::Notifications& notifications, BlockValidationState& state, const bilingual_str& message);

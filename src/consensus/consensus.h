@@ -66,7 +66,7 @@ static const int64_t PQ_SIGOPS_COST = 2;
  *  Nothing anchors into this chain yet, and 100 per block is 1,200 ledgers
  *  settling hourly or 28,800 daily — far past anything plausible this decade.
  *  Against that, the cost of being generous is permanent: at the old cap an
- *  attacker could bury 10.5 GB a year in the chain for ~105 XCF, because an
+ *  attacker could bury 10.5 GB a year in the chain for ~105 XID, because an
  *  OP_RETURN output is worth zero so the settlement levy on it is zero and only
  *  the byte floor applies. A young chain has no fee pressure to price that out,
  *  and NO fork ever removes bytes already written. Being too tight is

@@ -48,10 +48,16 @@ FUZZ_TARGET(bip324_cipher_roundtrip, .init=Initialize)
     assert(!initiator);
     BIP324Cipher responder(resp_key, resp_ent);
     assert(!responder);
-    initiator.Initialize(responder.GetOurPubKey(), true);
+    // HX1 (XIP-4): in the hybrid modes the ECDH secret is kept, in locked memory, for the switch to the
+    // stage-2 keys below; the kill switch (OFF) keeps nothing.
+    const auto hybrid_mode{static_cast<V2HybridMode>(provider.ConsumeIntegral<uint8_t>() % 3)};
+    initiator.Initialize(responder.GetOurPubKey(), true, /*self_decrypt=*/false, hybrid_mode);
     assert(initiator);
-    responder.Initialize(initiator.GetOurPubKey(), false);
+    responder.Initialize(initiator.GetOurPubKey(), false, /*self_decrypt=*/false, hybrid_mode);
     assert(responder);
+    assert(initiator.HasStage2Secret() == (hybrid_mode != V2HybridMode::OFF));
+    assert(responder.HasStage2Secret() == (hybrid_mode != V2HybridMode::OFF));
+    assert(!initiator.IsStage2() && !responder.IsStage2());
 
     // Initialize RNG deterministically, to generate contents and AAD. We assume that there are no
     // (potentially buggy) edge cases triggered by specific values of contents/AAD, so we can avoid
@@ -64,7 +70,56 @@ FUZZ_TARGET(bip324_cipher_roundtrip, .init=Initialize)
     assert(std::ranges::equal(initiator.GetSendGarbageTerminator(), responder.GetReceiveGarbageTerminator()));
     assert(std::ranges::equal(initiator.GetReceiveGarbageTerminator(), responder.GetSendGarbageTerminator()));
 
+    // The stage-2 inputs (only hashed, so the RNG can supply them), and the packet before which both sides
+    // switch: never, if that is out of range or the secret was discarded first.
+    const auto kem_secret{rng.randbytes<std::byte>(BIP324Cipher::HX1_SHARED_SECRET_LEN)};
+    const auto ct{rng.randbytes<std::byte>(BIP324Cipher::HX1_CT_LEN)};
+    const auto ek{rng.randbytes<std::byte>(BIP324Cipher::HX1_EK_LEN)};
+    const unsigned switch_before{provider.ConsumeIntegralInRange<unsigned>(0, 300)};
+    const bool discard{provider.ConsumeBool()};
+    if (discard) {
+        initiator.DiscardStage2Secret();
+        responder.DiscardStage2Secret();
+    }
+    const bool can_switch{hybrid_mode != V2HybridMode::OFF && !discard};
+    assert(initiator.HasStage2Secret() == can_switch && responder.HasStage2Secret() == can_switch);
+    // Wrong lengths are refused without any change.
+    const bool short_secret{initiator.SwitchToStage2(std::span{kem_secret}.first(kem_secret.size() - 1), ct, ek)};
+    const bool short_ct{initiator.SwitchToStage2(kem_secret, std::span{ct}.first(ct.size() - 1), ek)};
+    const bool short_ek{initiator.SwitchToStage2(kem_secret, ct, std::span{ek}.first(ek.size() - 1))};
+    assert(!short_secret && !short_ct && !short_ek);
+    assert(initiator.HasStage2Secret() == can_switch && !initiator.IsStage2());
+    {
+        // The stage-2 derivation is a function of its inputs, with pairwise different outputs.
+        BIP324Cipher::Stage2Keys keys, again;
+        const auto ecdh_secret{rng.randbytes<std::byte>(32)};
+        BIP324Cipher::DeriveStage2Keys(Params().MessageStart(), kem_secret, ecdh_secret, ct, initiator.GetOurPubKey(), ek, responder.GetOurPubKey(), keys);
+        BIP324Cipher::DeriveStage2Keys(Params().MessageStart(), kem_secret, ecdh_secret, ct, initiator.GetOurPubKey(), ek, responder.GetOurPubKey(), again);
+        const std::array<std::span<const std::byte>, 5> outputs{keys.initiator_L, keys.initiator_P, keys.responder_L, keys.responder_P, keys.session_id};
+        const std::array<std::span<const std::byte>, 5> outputs_again{again.initiator_L, again.initiator_P, again.responder_L, again.responder_P, again.session_id};
+        for (size_t i{0}; i < outputs.size(); ++i) {
+            assert(std::ranges::equal(outputs[i], outputs_again[i]));
+            for (size_t j{i + 1}; j < outputs.size(); ++j) {
+                assert(!std::ranges::equal(outputs[i], outputs[j]));
+            }
+        }
+    }
+
+    unsigned packet{0};
     LIMITED_WHILE(provider.remaining_bytes(), 1000) {
+        if (packet++ == switch_before) {
+            // Both sides switch between two packets: new ciphers from packet 0, a new session id, once only.
+            const std::vector<std::byte> session_id1(initiator.GetSessionID().begin(), initiator.GetSessionID().end());
+            const bool switched_initiator{initiator.SwitchToStage2(kem_secret, ct, ek)};
+            const bool switched_responder{responder.SwitchToStage2(kem_secret, ct, ek)};
+            assert(switched_initiator == can_switch && switched_responder == can_switch);
+            assert(initiator.IsStage2() == can_switch && responder.IsStage2() == can_switch);
+            assert(!initiator.HasStage2Secret() && !responder.HasStage2Secret());
+            assert(std::ranges::equal(initiator.GetSessionID(), responder.GetSessionID()));
+            assert(std::ranges::equal(initiator.GetSessionID(), session_id1) == !can_switch);
+            const bool switched_again{initiator.SwitchToStage2(kem_secret, ct, ek)};
+            assert(!switched_again);
+        }
         // Mode:
         // - Bit 0: whether the ignore bit is set in message
         // - Bit 1: whether the responder (0) or initiator (1) sends

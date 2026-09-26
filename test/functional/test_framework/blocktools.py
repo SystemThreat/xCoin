@@ -82,16 +82,16 @@ REGTEST_RETARGET_PERIOD = 150
 #    "anyone-can-spend" output is the witness v3 tree with a single 0xc0 leaf
 #    over OP_TRUE (test_framework/xcoin.py), spent with no signature at all.
 # 2. Emission: block 0 mints nothing; from block 1 every block pays the era
-#    subsidy of the regtest table (src/kernel/chainparams.cpp): 50 XCF for
+#    subsidy of the regtest table (src/kernel/chainparams.cpp): 50 XID for
 #    heights 1..150, 25 for 151..300, 12.5 for 301..450 and 6.25 from 451 on,
-#    until the cap. Block 1 is an ordinary block: there is no genesis
+#    until the 100,000,000 XID cap. Block 1 is an ordinary block: there is no genesis
 #    distribution and nothing is carried in.
 ANYONECANSPEND_V3 = xcoin_v3_op_true()
 ANYONECANSPEND_V3_SCRIPT = ANYONECANSPEND_V3.scriptPubKey
 ANYONECANSPEND_V3_WITNESS = ANYONECANSPEND_V3.witness_stack()
 
-REGTEST_EMISSION_END_HEIGHT = 3358350  # REGTEST_EMISSION_TABLE in src/kernel/chainparams.cpp: the last block with a subsidy
-REGTEST_EMISSION_ERAS = 4  # 50 / 25 / 12.5 / 6.25 XCF; the last rate runs until the cap
+REGTEST_EMISSION_END_HEIGHT = 15998350  # REGTEST_EMISSION_TABLE in src/kernel/chainparams.cpp: the last block with a subsidy
+REGTEST_EMISSION_ERAS = 4  # 50 / 25 / 12.5 / 6.25 XID; the last rate runs until the cap
 
 def get_block_subsidy(height, halving_period=REGTEST_RETARGET_PERIOD, base=50):
     """The regtest era subsidy at `height`, in satoshi (GetBlockSubsidy on the

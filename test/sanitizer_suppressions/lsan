@@ -2,3 +2,5 @@
 leak:libQt6Widgets
 leak:QDBusConnectionPrivate
 leak:QLayoutPrivate
+# libFuzzer detaches its RSS-limit thread (compiler-rt FuzzerDriver.cpp); on macOS LSan reports its std::thread state at exit
+leak:fuzzer::StartRssThread

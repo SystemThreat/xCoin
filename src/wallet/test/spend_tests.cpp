@@ -23,7 +23,7 @@ struct LevyChain100Setup : public TestChain100Setup {
 };
 
 /** The SubtractFee scenario: a subtract-from-recipient spend of the wallet's one
- *  mature 50 XCF coinbase, `leftover` under the input, never creates change and
+ *  mature 50 XID coinbase, `leftover` under the input, never creates change and
  *  pays the leftover to the recipient rather than the miner. Returns the fee. */
 CAmount CheckSubtractFeeTx(CWallet& wallet, CAmount leftover_input_amount)
 {
@@ -45,7 +45,7 @@ CAmount CheckSubtractFeeTx(CWallet& wallet, CAmount leftover_input_amount)
 
 BOOST_FIXTURE_TEST_SUITE(spend_tests, WalletTestingSetup)
 
-// The wallet owns one mature coinbase (witness v2, 50 XCF) through the
+// The wallet owns one mature coinbase (witness v2, 50 XID) through the
 // post-quantum coinbase descriptor and spends it with an ML-DSA-65 witness.
 // The change type is the witness v3 script tree, whose cost of change (about
 // 1,400 vB of witness to spend) dwarfs the fee of this one-input spend, so a
@@ -85,8 +85,8 @@ BOOST_FIXTURE_TEST_CASE(SubtractFee, TestChain100Setup)
 }
 
 // The same scenario under the chain's settlement levy (REGENESIS.md section 6):
-// the wallet floors the fee at the levy the outputs owe, which for a 50 XCF spend
-// is the per-transaction cap (0.0001 XCF, above the fee-rate fee here), the
+// the wallet floors the fee at the levy the outputs owe, which for a 50 XID spend
+// is the per-transaction cap (0.0001 XID, above the fee-rate fee here), the
 // leftover still goes to the recipient, and the node's mempool accepts the
 // result: one satoshi less would be bad-txns-levy.
 BOOST_FIXTURE_TEST_CASE(LevySubtractFee, LevyChain100Setup)
@@ -131,7 +131,7 @@ BOOST_FIXTURE_TEST_CASE(wallet_duplicated_preset_inputs_test, TestChain100Setup)
 {
     // Verify that the wallet's Coin Selection process does not include pre-selected inputs twice in a transaction.
 
-    // Add 4 spendable UTXO, 50 XCF each, to the wallet (total balance 200 XCF):
+    // Add 4 spendable UTXO, 50 XID each, to the wallet (total balance 200 XID):
     // four coinbases to the post-quantum coinbase descriptor, then maturity.
     for (int i = 0; i < 4; i++) CreateAndProcessBlock({}, TestPQCoinbaseScript());
     mineBlocks(COINBASE_MATURITY);
@@ -140,11 +140,11 @@ BOOST_FIXTURE_TEST_CASE(wallet_duplicated_preset_inputs_test, TestChain100Setup)
     LOCK(wallet->cs_wallet);
     auto available_coins = AvailableCoins(*wallet);
     std::vector<COutput> coins = available_coins.All();
-    // Preselect the first 3 UTXO (150 XCF total)
+    // Preselect the first 3 UTXO (150 XID total)
     std::set<COutPoint> preset_inputs = {coins[0].outpoint, coins[1].outpoint, coins[2].outpoint};
 
     // Try to create a tx that spends more than what preset inputs + wallet selected inputs are covering for.
-    // The wallet can cover up to 200 XCF, and the tx target is 299 XCF.
+    // The wallet can cover up to 200 XID, and the tx target is 299 XID.
     std::vector<CRecipient> recipients{{*Assert(wallet->GetNewDestination(OutputType::XCOIN_V3, "dummy")),
                                            /*nAmount=*/299 * COIN, /*fSubtractFeeFromAmount=*/true}};
     CCoinControl coin_control;
@@ -153,16 +153,16 @@ BOOST_FIXTURE_TEST_CASE(wallet_duplicated_preset_inputs_test, TestChain100Setup)
         coin_control.Select(outpoint);
     }
 
-    // Attempt to send 299 XCF from a wallet that only has 200 XCF. The wallet should exclude
+    // Attempt to send 299 XID from a wallet that only has 200 XID. The wallet should exclude
     // the preset inputs from the pool of available coins, realize that there is not enough
     // money to fund the 299 BTC payment, and fail with "Insufficient funds".
     //
-    // Even with SFFO, the wallet can only afford to send 200 XCF.
+    // Even with SFFO, the wallet can only afford to send 200 XID.
     // If the wallet does not properly exclude preset inputs from the pool of available coins
     // prior to coin selection, it may create a transaction that does not fund the full payment
     // amount or, through SFFO, incorrectly reduce the recipient's amount by the difference
-    // between the original target and the wrongly counted inputs (in this case 99 XCF)
-    // so that the recipient's amount is no longer equal to the user's selected target of 299 XCF.
+    // between the original target and the wrongly counted inputs (in this case 99 XID)
+    // so that the recipient's amount is no longer equal to the user's selected target of 299 XID.
 
     // First case, use 'subtract_fee_from_outputs=true'
     BOOST_CHECK(!CreateTransaction(*wallet, recipients, /*change_pos=*/std::nullopt, coin_control));

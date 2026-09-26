@@ -7,15 +7,23 @@
 //
 // The block is charter::CreateGenesisBlock(): a coinbase whose scriptSig
 // carries charter::GenesisMessage() — "Hic experimentum prosperat - <date> -
-// 2,100,000,000,000,000 sats, 21M XCF" — and whose only output is the
-// zero-value OP_RETURN charter commitment ("XCOIN/charter/1" || CHARTER_HASH ||
-// SHA-256(v1 genesis header)). Nothing is minted. The coinbase is run through
+// 10,000,000,000,000,000 sats, 100M XID" — and whose only output is the
+// zero-value OP_RETURN charter commitment ("XCOIN/charter/1" || CHARTER_HASH, 47
+// bytes; no lineage field, nothing of the v1 chain is referenced). Nothing is
+// minted. The coinbase is run through
 // CheckTransaction so an over-long message (bad-cb-length, 100-byte scriptSig)
 // is refused here rather than by every node at startup. The nonce is ground with the node's own
 // MetalDAG path (metaldag::PoWHash + CheckProofOfWorkImpl) under the chosen
 // chain's DAG sizing with metaldagBaseTime = nTime, exactly as the node will
 // verify it. On success it prints the FINAL_GENESIS_* lines for
 // src/kernel/chainparams.cpp, the CURRENCY_ID and the measured hash rate.
+//
+// A mainnet genesis commits to the charter, and charter section 4 states the
+// emission shape. While that shape is PROVISIONAL (the charter says so, or
+// Consensus::EMISSION_SHAPE_IS_FINAL is false), -chain=main is refused: the
+// placeholder would become part of the currency identity. -allowprovisional
+// overrides this for the local dress rehearsal only (REHEARSAL-2.md), and the
+// paste block it prints says REHEARSAL ONLY.
 
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
@@ -52,6 +60,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -69,7 +78,7 @@ void SetupArgs(ArgsManager& argsman)
     SetupHelpOptions(argsman);
     argsman.AddArg("-version", "Print version and exit", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-time=<unix>", "Genesis nTime in seconds since the epoch (default: now). It is also metaldagBaseTime (MetalDAG epoch 0 starts here) and the ASERT anchor. Mining refuses a stamp more than an hour old; -verify accepts any.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-message=<text>", "Coinbase text (at most 91 characters: the coinbase scriptSig is capped at 100 bytes). Default: \"Hic experimentum prosperat - <UTC date of -time> - 2,100,000,000,000,000 sats, 21M XCF\" (REGENESIS.md section 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-message=<text>", "Coinbase text (at most 91 characters: the coinbase scriptSig is capped at 100 bytes). Default: \"Hic experimentum prosperat - <UTC date of -time> - 10,000,000,000,000,000 sats, 100M XID\" (REGENESIS.md section 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-bits=<hex>", strprintf("nBits (default: %08x)", DEFAULT_BITS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blockversion=<n>", strprintf("Header version (default: %d)", DEFAULT_VERSION), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     // Not "-nonce": ArgsManager reads any -no<x> option as the negation of -<x>.
@@ -78,6 +87,7 @@ void SetupArgs(ArgsManager& argsman)
     argsman.AddArg("-maxattempts=<n>", strprintf("Give up after this many hashes in total (default: %d)", DEFAULT_MAX_ATTEMPTS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-verify", "Do not mine: build the block at -startnonce, check its MetalDAG proof of work and print the paste block", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-quiet", "No progress lines", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-allowprovisional", "Local dress rehearsal only (contrib/regenesis/REHEARSAL-2.md): build a mainnet genesis although the emission shape is PROVISIONAL. Its constants must never leave the machine. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     // -chain / -testnet / -regtest: whose MetalDAG DAG sizing and powLimit apply (default: main).
     SetupChainParamsBaseOptions(argsman);
 }
@@ -122,12 +132,16 @@ std::string HeaderHex(const CBlockHeader& header)
     return HexStr(ss);
 }
 
-void PrintPasteBlock(const CBlock& block, const std::string& message, const Consensus::Params& params, const std::string& chain)
+void PrintPasteBlock(const CBlock& block, const std::string& message, const Consensus::Params& params, const std::string& chain, bool provisional_rehearsal)
 {
     const CBlockHeader header{block};
     const uint256 pow_hash{metaldag::PoWHash(header, params)};
     const metaldag::EpochSizing sizing{metaldag::GetEpochSizing(header.nTime, params)};
     tfm::format(std::cout, "\n");
+    if (provisional_rehearsal) {
+        tfm::format(std::cout, "// REHEARSAL ONLY (-allowprovisional): this genesis commits to a charter whose emission shape is PROVISIONAL.\n");
+        tfm::format(std::cout, "// It compiles only in a -DXCOIN_REHEARSAL_BUILD=ON build; never paste it into a tree that leaves this machine.\n");
+    }
     tfm::format(std::cout, "// xcoin-genesis (%s params, MetalDAG epoch %d: DAG %d bytes, cache %d bytes): paste into\n", chain, sizing.epoch, sizing.full_size, sizing.cache_size);
     tfm::format(std::cout, "// src/kernel/chainparams.cpp next to GENESIS_IS_FINAL and set it to true.\n");
     tfm::format(std::cout, "static constexpr bool GENESIS_IS_FINAL = true;\n");
@@ -140,7 +154,7 @@ void PrintPasteBlock(const CBlock& block, const std::string& message, const Cons
     tfm::format(std::cout, "// consensus.metaldagBaseTime = FINAL_GENESIS_TIME (%u); browser miner / pool: metaldagBaseTime = %u\n", header.nTime, header.nTime);
     tfm::format(std::cout, "// FINAL_GENESIS_VERSION        = %d\n", header.nVersion);
     tfm::format(std::cout, "// CHARTER_HASH                 = %s\n", charter::DigestHex(Consensus::CHARTER_HASH));
-    tfm::format(std::cout, "// SHA-256(v1 genesis header)   = %s  (v1 genesis %s)\n", charter::DigestHex(charter::V1GenesisHeaderSha256()), Consensus::V1_GENESIS_HASH.GetHex());
+    tfm::format(std::cout, "// SHA-256(v1 genesis header)   = %s  (v1 genesis %s; identification only, not committed)\n", charter::DigestHex(charter::V1GenesisHeaderSha256()), Consensus::V1_GENESIS_HASH.GetHex());
     tfm::format(std::cout, "// charter output               = %s\n", HexStr(charter::CommitmentScript()));
     tfm::format(std::cout, "// coinbase txid                = %s\n", block.vtx[0]->GetHash().GetHex());
     tfm::format(std::cout, "// MetalDAG PoW hash            = %s\n", pow_hash.GetHex());
@@ -172,7 +186,10 @@ MAIN_FUNCTION
                      "the FINAL_GENESIS_* constants for src/kernel/chainparams.cpp and the CURRENCY_ID.\n"
                      "\n"
                      "Usage:  xcoin-genesis [-time=<unix>] [-message=<text>] [-bits=<hex>] [-threads=<n>] [-maxattempts=<n>]\n"
-                     "        xcoin-genesis -time=<unix> -startnonce=<n> -verify\n";
+                     "        xcoin-genesis -time=<unix> -startnonce=<n> -verify\n"
+                     "\n"
+                     "-chain=main is refused while the emission shape is PROVISIONAL (charter section 4);\n"
+                     "-allowprovisional overrides that for the local dress rehearsal only (REHEARSAL-2.md).\n";
             usage += "\n" + args.GetHelpMessage();
         }
         tfm::format(std::cout, "%s", usage);
@@ -184,6 +201,23 @@ MAIN_FUNCTION
         const ChainType chain_type{args.GetChainType()};
         const std::unique_ptr<const CChainParams> chainparams{CreateChainParams(args, chain_type)};
         Consensus::Params params{chainparams->GetConsensus()};
+
+        // The emission shape must be final before a mainnet genesis commits to it.
+        const bool charter_provisional{charter::Text().find("PROVISIONAL") != std::string_view::npos};
+        const bool provisional_rehearsal{chain_type == ChainType::MAIN && (charter_provisional || !Consensus::EMISSION_SHAPE_IS_FINAL)};
+        if (provisional_rehearsal) {
+            if (!args.GetBoolArg("-allowprovisional", false)) {
+                tfm::format(std::cerr, "Error: refusing to build a mainnet genesis while the emission shape is PROVISIONAL "
+                                       "(charter section 4 %s; EMISSION_SHAPE_IS_FINAL is %s).\n"
+                                       "The genesis commits to the charter, so the placeholder shape would become part of the currency identity.\n"
+                                       "Install the final shape first (contrib/regenesis/EMISSION-SHAPE-SPOTS.md). For the local dress rehearsal\n"
+                                       "only (contrib/regenesis/REHEARSAL-2.md), pass -allowprovisional.\n",
+                            charter_provisional ? "carries a PROVISIONAL comment" : "has no PROVISIONAL comment", Consensus::EMISSION_SHAPE_IS_FINAL ? "true" : "false");
+                return EXIT_FAILURE;
+            }
+            tfm::format(std::cerr, "\n*** -allowprovisional: this MAINNET genesis commits to a PROVISIONAL emission shape. ***\n"
+                                   "*** REHEARSAL ONLY: never paste the result into a tree that leaves this machine.  ***\n\n");
+        }
 
         // Header time. Default: now. The genesis nTime is the ASERT anchor: every
         // hour between it and the first mined block is an hour the difficulty
@@ -277,7 +311,7 @@ MAIN_FUNCTION
             const bool ok{CheckProofOfWorkImpl(first_hash, n_bits, params)};
             tfm::format(std::cout, "nonce %u: MetalDAG PoW hash %s %s the target\n", block.nNonce, first_hash.GetHex(), ok ? "meets" : "does NOT meet");
             if (!ok) return EXIT_FAILURE;
-            PrintPasteBlock(block, message, params, chain);
+            PrintPasteBlock(block, message, params, chain, provisional_rehearsal);
             return EXIT_SUCCESS;
         }
 
@@ -341,7 +375,7 @@ MAIN_FUNCTION
         } else {
             tfm::format(std::cout, "node CheckProofOfWork(header): deferred (nTime is more than %d s ahead of this clock; the PoW hash itself is verified above)\n", 2 * MAX_FUTURE_BLOCK_TIME);
         }
-        PrintPasteBlock(block, message, params, chain);
+        PrintPasteBlock(block, message, params, chain, provisional_rehearsal);
         return EXIT_SUCCESS;
     } catch (const std::exception& e) {
         PrintExceptionContinue(&e, "xcoin-genesis");

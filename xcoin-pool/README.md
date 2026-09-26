@@ -1,6 +1,6 @@
 # xcoin-pool
 
-A minimal **solo** Stratum pool for xCoin (XCF). Point a **MetalDAG-capable**
+A minimal **solo** Stratum pool for xCoin (XID). Point a **MetalDAG-capable**
 Stratum miner such as NerdMiner at it: when one of your shares meets the network
 target you find a block and receive the full block reward at your own `xpa1r…`
 address (`txa1r…` on the rehearsal chain). Ordinary Bitcoin SHA-256d ASICs do not

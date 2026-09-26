@@ -226,7 +226,7 @@ class XcoinV3WalletTest(BitcoinTestFramework):
         utxo = next(u for u in w.listunspent() if u["amount"] >= 10)
         # The fee is derived, not fixed: the settlement levy (REGENESIS.md
         # section 6) is ceil(outputs * 5 / 10000), so a flat 0.01 stops
-        # clearing it as soon as the coin is worth more than 20 XCF and the
+        # clearing it as soon as the coin is worth more than 20 XID and the
         # transaction is rejected as "bad-txns-levy" before policy is reached.
         fee = max(Decimal("0.01"), settlement_levy(utxo["amount"] - Decimal("0.01")))
         change_amount = utxo["amount"] - fee

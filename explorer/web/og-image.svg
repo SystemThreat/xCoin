@@ -15,7 +15,7 @@
   <text x="120" y="330" font-family="Menlo, Consolas, 'Liberation Mono', monospace" font-weight="900" font-size="78" letter-spacing="-5" fill="#ffffff">THE CHAIN, IN THE OPEN.</text>
   <text x="120" y="420" font-family="Menlo, Consolas, 'Liberation Mono', monospace" font-weight="900" font-size="78" letter-spacing="-5" fill="#c7ff2e">JOIN THE MINERS.</text>
   <!-- tagline -->
-  <text x="80" y="530" font-family="Menlo, Consolas, 'Liberation Mono', monospace" font-weight="700" font-size="26" fill="#0a0a0a">The post-quantum xCoin (XCF) block explorer</text>
-  <text x="80" y="572" font-family="Menlo, Consolas, 'Liberation Mono', monospace" font-weight="500" font-size="22" fill="#626262">21,000,000 XCF cap · witness v3 addresses · MetalDAG proof of work</text>
+  <text x="80" y="530" font-family="Menlo, Consolas, 'Liberation Mono', monospace" font-weight="700" font-size="26" fill="#0a0a0a">The post-quantum xCoin (XID) block explorer</text>
+  <text x="80" y="572" font-family="Menlo, Consolas, 'Liberation Mono', monospace" font-weight="500" font-size="22" fill="#626262">100,000,000 XID cap · witness v3 addresses · MetalDAG proof of work</text>
   <rect x="1192" y="0" width="8" height="630" fill="#c7ff2e"/>
 </svg>

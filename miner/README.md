@@ -8,7 +8,8 @@ Tools); the binary is `./NerdMiner`, and `MacMetalCLI` is a compatibility symlin
 `NerdMiner login` — log in to **MineDifferent** (the xCoin forum) with your xCoin identity (`xid1…`) by signing a
 challenge with your wallet's ML-DSA-65 key. No password exists anywhere. The miner never sees a key: it shells out
 to the xCoin wallet CLI, which does the unlock (a passphrase typed at the terminal or handed over a pipe with
-`--passphrase-fd`, or an NTAG 424 card tap; never an environment variable) and the signature. The identity is a forum handle derived from the same key as your addresses; it cannot receive XCF.
+`--passphrase-fd`, or an NTAG 424 card tap; never an environment variable) and the signature. The identity (`xid1…`) is a forum handle derived from the same key as your addresses, not a payout address; coins
+cannot be sent to it. Payout addresses start `xpa1r` (`txa1r` on testnet A).
 
 ```
 NerdMiner login --index 101          # make a challenge, sign with the forum key, open a one-time login link

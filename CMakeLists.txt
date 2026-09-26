@@ -107,6 +107,10 @@ option(BUILD_TESTS "Build test_bitcoin and other unit test executables." ON)
 option(BUILD_TX "Build bitcoin-tx executable." ${BUILD_TESTS})
 option(BUILD_UTIL "Build bitcoin-util executable." ${BUILD_TESTS})
 option(BUILD_XCOIN_GENESIS "Build xcoin-genesis, the xCoin v2 genesis miner (contrib/regenesis/REGENESIS.md)." ${BUILD_TESTS})
+# Local dress rehearsal only (contrib/regenesis/REHEARSAL-2.md). Lets GENESIS_IS_FINAL = true
+# compile while the emission shape is still PROVISIONAL (kernel/chainparams.cpp). Use a separate
+# build directory; a build with this ON must never produce anything that leaves the machine.
+option(XCOIN_REHEARSAL_BUILD "Local dress-rehearsal build only: allow a pasted mainnet genesis on a provisional emission shape. Never for a release." OFF)
 
 option(BUILD_UTIL_CHAINSTATE "Build experimental bitcoin-chainstate executable." OFF)
 option(BUILD_KERNEL_LIB "Build experimental bitcoinkernel library." ${BUILD_UTIL_CHAINSTATE})
@@ -576,6 +580,12 @@ endif()
 target_compile_definitions(core_interface INTERFACE ${DEPENDS_COMPILE_DEFINITIONS})
 target_compile_definitions(core_interface_relwithdebinfo INTERFACE ${DEPENDS_COMPILE_DEFINITIONS_RELWITHDEBINFO})
 target_compile_definitions(core_interface_debug INTERFACE ${DEPENDS_COMPILE_DEFINITIONS_DEBUG})
+if(XCOIN_REHEARSAL_BUILD)
+  target_compile_definitions(core_interface INTERFACE XCOIN_REHEARSAL_BUILD)
+  list(APPEND configure_warnings
+    "XCOIN_REHEARSAL_BUILD is ON: a local dress-rehearsal build (contrib/regenesis/REHEARSAL-2.md). Nothing built here may leave this machine."
+  )
+endif()
 
 # If the {CXX,LD}FLAGS environment variables are defined during building depends
 # and configuring this build system, their content might be duplicated.
@@ -638,6 +648,7 @@ else()
   set(ipc_status OFF)
 endif()
 message("  IPC ................................. ${ipc_status}")
+message("  xCoin rehearsal build (local only) .. ${XCOIN_REHEARSAL_BUILD}")
 message("  Embedded ASMap ...................... ${WITH_EMBEDDED_ASMAP}")
 message("  USDT tracing ........................ ${WITH_USDT}")
 message("Tests:")

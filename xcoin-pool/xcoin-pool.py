@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-xcoin-pool — a minimal SOLO Stratum pool for Xcoin (XCF).
+xcoin-pool — a minimal SOLO Stratum pool for Xcoin (XID).
 
 Point a MetalDAG-capable Stratum miner (for example NerdMiner) at this pool: when
 one of your shares meets the network target you find a block and receive the full
@@ -95,7 +95,7 @@ MAX_BLOCK_DATACARRIER_BYTES = 8_000     # consensus/consensus.h: 100 anchors of 
 SETTLEMENT_LEVY_BP = 0                  # genesis rule: no levy
 SETTLEMENT_LEVY_CAP_SAT = 0             # genesis rule: no levy
 SETTLEMENT_LEVY_REFERENCE_BP = 5        # consensus/params.h SETTLEMENT_LEVY_BP: the documented activation rate
-SETTLEMENT_LEVY_REFERENCE_CAP_SAT = 10_000  # consensus/params.h SETTLEMENT_LEVY_CAP_SAT: 0.0001 XCF
+SETTLEMENT_LEVY_REFERENCE_CAP_SAT = 10_000  # consensus/params.h SETTLEMENT_LEVY_CAP_SAT: 0.0001 XID
 LEVY_DENOMINATOR = 10_000
 
 # ── RPC ──────────────────────────────────────────────────────────────────────
@@ -285,7 +285,7 @@ def discord_block_found(worker, addr, height, blockhash, reward="?"):
             "fields": [
                 {"name": "Miner", "value": f"`{worker}`", "inline": False},
                 {"name": "Address", "value": f"`{addr}`", "inline": False},
-                {"name": "Reward", "value": f"{reward} XCF", "inline": True},
+                {"name": "Reward", "value": f"{reward} XID", "inline": True},
                 {"name": "Block", "value": f"[`{blockhash[:16]}…`]({CFG['explorer_url']}/block/{blockhash})", "inline": True},
             ],
         }],

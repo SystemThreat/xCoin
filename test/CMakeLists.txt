@@ -97,3 +97,22 @@ function(create_test_directory_links)
 endfunction()
 
 create_test_directory_links()
+
+# xCoin: the emission table in src/consensus/params.h is generated from
+# contrib/regenesis/emission-policy.json. emission_policy_check_params fails when the
+# policy changed without regeneration, the rows were edited by hand, MAX_SUPPLY_SAT or
+# MAX_MONEY disagree with the cap, or charter section 4's PROVISIONAL comment disagrees
+# with the policy status, or the generated rows differ byte for byte from
+# contrib/regenesis/emission-rows.txt (the table whose SHA-256 charter section 4
+# states). emission_shape_spots fails when a line carrying the
+# emission-shape grep tag is added or removed without updating
+# contrib/regenesis/EMISSION-SHAPE-SPOTS.md (which names the tag).
+if(BUILD_TESTS AND Python3_EXECUTABLE)
+  add_test(NAME emission_policy_check_params
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/contrib/regenesis/emission.py --check-params --quiet
+            --rows ${PROJECT_SOURCE_DIR}/contrib/regenesis/emission-rows.txt
+  )
+  add_test(NAME emission_shape_spots
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/contrib/regenesis/emission.py --check-spots
+  )
+endif()

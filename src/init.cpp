@@ -566,6 +566,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-i2pacceptincoming", strprintf("Whether to accept inbound I2P connections (default: %i). Ignored if -i2psam is not set. Listening for inbound I2P connections is done through the SAM proxy, not by binding to a local address and port.", DEFAULT_I2P_ACCEPT_INCOMING), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-onlynet=<net>", "Make automatic outbound connections only to network <net> (" + Join(GetNetworkNames(), ", ") + "). Inbound and manual connections are not affected by this option. It can be specified multiple times to allow multiple networks.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-v2transport", strprintf("Support v2 transport (default: %u)", DEFAULT_V2_TRANSPORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-v2hybrid=<n>", strprintf("Hybrid post-quantum (ML-KEM-768) upgrade of the v2 transport, HX1 (XIP-4): 0 = off, 1 = prefer (stay classical with peers that do not take part), 2 = require (disconnect them, and never fall back to v1) (default: %u)", static_cast<unsigned>(DEFAULT_V2_HYBRID)), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transaction with bloom filters (default: %u)", DEFAULT_PEERBLOOMFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-txreconciliation", strprintf("Enable transaction reconciliations per BIP 330 (default: %d)", DEFAULT_TXRECONCILIATION_ENABLE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
@@ -644,7 +645,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     // UPnP is not compiled into this node (PCP/NAT-PMP is, see -natpmp). -upnp is accepted and ignored so every
     // rehearsal command line can state -natpmp=0 -upnp=0 explicitly (contrib/regenesis/TESTNET-A.md).
     argsman.AddArg("-upnp", "", ArgsManager::ALLOW_ANY, OptionsCategory::HIDDEN);
-    argsman.AddArg("-allowunfinalgenesis", "Cutover dry run only: start a mainnet node although this build's v2 genesis is not final (GENESIS_IS_FINAL is false and the v1 genesis stands in). Never for a node that peers with anyone. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-allowunfinalgenesis", "Cutover dry run and tests only: start a mainnet or testnet A node although this build's genesis for that chain is not final (GENESIS_IS_FINAL or TESTNET_GENESIS_IS_FINAL is false and the v1 genesis stands in). Never for a node that peers with anyone. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-deprecatedrpc=<method>", "Allows deprecated RPC method(s) to be used", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", DEFAULT_STOPAFTERBLOCKIMPORT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-stopatheight", strprintf("Stop running after reaching the given height in the main chain (default: %u). Blocks after target height may be processed during shutdown.", DEFAULT_STOPATHEIGHT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
@@ -939,12 +940,16 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     if (args.GetBoolArg("-upnp", false)) {
         InitWarning(_("Option '-upnp' is set but UPnP is not compiled into this node; -upnp has no effect (use -natpmp for PCP/NAT-PMP)."));
     }
-    // The v2 mainnet must not start on a placeholder genesis (REGENESIS.md section 8 step 3).
+    // The v2 mainnet and testnet A must not start on a placeholder genesis (REGENESIS.md
+    // section 8 step 3; TESTNET-A.md).
     if (const auto refusal{CheckGenesisFinalityForStartup(chainparams, args.GetBoolArg("-allowunfinalgenesis", false))}) {
         return InitError(Untranslated(*refusal));
     }
-    if (chainparams.GetChainType() == ChainType::MAIN && args.GetBoolArg("-allowunfinalgenesis", false) && !chainparams.GenesisIsFinal()) {
-        InitWarning(_("-allowunfinalgenesis is set: this mainnet node runs on a PLACEHOLDER genesis. Cutover dry run only."));
+    if (chainparams.GetChainType() != ChainType::REGTEST && args.GetBoolArg("-allowunfinalgenesis", false) && !chainparams.GenesisIsFinal()) {
+        InitWarning(Untranslated(strprintf("-allowunfinalgenesis is set: this %s node runs on a PLACEHOLDER genesis. Cutover dry run and tests only.", chainparams.GetChainType() == ChainType::MAIN ? "mainnet" : "testnet A")));
+    }
+    if constexpr (IS_REHEARSAL_BUILD) {
+        InitWarning(Untranslated("This is a local rehearsal build (XCOIN_REHEARSAL_BUILD, contrib/regenesis/REHEARSAL-2.md). Its genesis constants and binaries must never leave this machine."));
     }
     if (args.GetBoolArg("-allowsolomining", DEFAULT_ALLOW_SOLO_MINING) &&
         (chainparams.GetChainType() == ChainType::MAIN || chainparams.GetChainType() == ChainType::TESTNET)) {
@@ -1006,6 +1011,15 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     // Signal NODE_P2P_V2 if BIP324 v2 transport is enabled.
     if (args.GetBoolArg("-v2transport", DEFAULT_V2_TRANSPORT)) {
         g_local_services = ServiceFlags(g_local_services | NODE_P2P_V2);
+    }
+    if (const auto value{args.GetArg("-v2hybrid")}) {
+        const auto mode{ParseV2HybridMode(*value)};
+        if (!mode) {
+            return InitError(strprintf(_("Invalid -v2hybrid value '%s' (must be 0, 1 or 2)."), *value));
+        }
+        if (*mode == V2HybridMode::REQUIRE && !(g_local_services & NODE_P2P_V2)) {
+            return InitError(_("Cannot set -v2hybrid=2 without -v2transport."));
+        }
     }
 
     // Signal NODE_COMPACT_FILTERS if peerblockfilters and basic filters index are both enabled.
@@ -2132,6 +2146,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     connOptions.whitelist_forcerelay = args.GetBoolArg("-whitelistforcerelay", DEFAULT_WHITELISTFORCERELAY);
     connOptions.whitelist_relay = args.GetBoolArg("-whitelistrelay", DEFAULT_WHITELISTRELAY);
     connOptions.m_capture_messages = args.GetBoolArg("-capturemessages", false);
+    connOptions.m_v2_hybrid_mode = ParseV2HybridMode(args.GetArg("-v2hybrid", "")).value_or(DEFAULT_V2_HYBRID);
 
     // Port to bind to if `-bind=addr` is provided without a `:port` suffix.
     const uint16_t default_bind_port =

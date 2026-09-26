@@ -249,7 +249,7 @@ class TestBitcoinCli(BitcoinTestFramework):
             wallet_info = self.nodes[0].getwalletinfo()
             assert_equal(int(cli_get_info['Keypool size']), wallet_info['keypoolsize'])
             assert_equal(int(cli_get_info['Unlocked until']), wallet_info['unlocked_until'])
-            assert_equal(Decimal(cli_get_info['Min tx relay fee rate (BTC/kvB)']), network_info['relayfee'])
+            assert_equal(Decimal(cli_get_info['Min tx relay fee rate (XID/kvB)']), network_info['relayfee'])
             assert_equal(self.nodes[0].cli.getwalletinfo(), wallet_info)
 
             # Setup to test -getinfo, -generate, and -rpcwallet= with multiple wallets.

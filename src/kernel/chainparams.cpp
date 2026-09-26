@@ -70,7 +70,7 @@ static constexpr std::string_view V1_GENESIS_MERKLE = "fac4f4af0516d1005efde1945
 //     xcoin-genesis -time=<T>            (T = the announced genesis time)
 // which builds the charter genesis (charter::CreateGenesisBlock: coinbase
 // message charter::GenesisMessage(<date>), "Hic experimentum prosperat - <date>
-// - 2,100,000,000,000,000 sats, 21M XCF" — the message carries no digest; the
+// - 10,000,000,000,000,000 sats, 100M XID" — the message carries no digest; the
 // full CHARTER_HASH is in the OP_RETURN charter output, the coinbase's only
 // output; nothing minted), mines the nonce with MetalDAG at metaldagBaseTime = T
 // and prints these lines ready to paste. Paste them, set GENESIS_IS_FINAL = true,
@@ -78,13 +78,13 @@ static constexpr std::string_view V1_GENESIS_MERKLE = "fac4f4af0516d1005efde1945
 // the v1 genesis as a placeholder: the binary links, `getcharter` reports
 // genesis_is_final=false, and the node refuses to start on mainnet
 // (CheckGenesisFinalityForStartup, below), so nothing starts by accident.
-static constexpr bool GENESIS_IS_FINAL = false;
-static constexpr std::string_view FINAL_GENESIS_MESSAGE = ""; // charter::GenesisMessage("<YYYY-MM-DD>")
-static constexpr uint32_t FINAL_GENESIS_TIME  = 0;
-static constexpr uint32_t FINAL_GENESIS_NONCE = 0;
+static constexpr bool GENESIS_IS_FINAL = true; // true compiles only with a final emission shape (the static_assert in CMainParams)
+static constexpr std::string_view FINAL_GENESIS_MESSAGE = "Hic experimentum prosperat - 2026-09-26 - 10,000,000,000,000,000 sats, 100M XID"; // charter::GenesisMessage("<YYYY-MM-DD>")
+static constexpr uint32_t FINAL_GENESIS_TIME  = 1790380800; // 2026-09-26T00:00:00Z
+static constexpr uint32_t FINAL_GENESIS_NONCE = 802894;
 static constexpr uint32_t FINAL_GENESIS_BITS  = 0x1e0fffff;
-static constexpr std::string_view FINAL_GENESIS_HASH   = "";
-static constexpr std::string_view FINAL_GENESIS_MERKLE = "";
+static constexpr std::string_view FINAL_GENESIS_HASH   = "3bc1a36df7d786a5c4584e21d248e0a3785a96aaa60a5b3959dfad50283379f2";
+static constexpr std::string_view FINAL_GENESIS_MERKLE = "5e80b4ba24a9fb9956ed06543af8b20354150e48962fef81a63b64783f4754df";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // xCoin testnet A (contrib/regenesis/TESTNET-A.md): the v2 rules on a separate
@@ -92,8 +92,8 @@ static constexpr std::string_view FINAL_GENESIS_MERKLE = "";
 // no distribution), the data-carrier cap, the 64M WU consensus block weight,
 // 300 s, ASERT 2 h, MetalDAG at the mainnet sizing with metaldagBaseTime = the
 // testnet genesis time, powLimit 0x1e0fffff — with its own magic, ports, HRP and
-// genesis. FINAL for testnet A; re-mined 2026-09-14 against charter 415b1dbc...
-// with
+// genesis. NOT FINAL on this branch (see TESTNET_GENESIS_IS_FINAL below); last mined
+// 2026-09-14 against charter 415b1dbc..., the 21,000,000 XCF charter, with
 //     xcoin-genesis -chain=test -time=1789379971 -threads=8 \
 //         -message="xCoin testnet A - 2026-09-14 - 2,100,000,000,000,000 sats, 21M XCF"
 // (mainnet and testnet A share the MetalDAG sizing and powLimit; the tool sets
@@ -112,10 +112,21 @@ static constexpr uint32_t TESTNET_GENESIS_BITS  = 0x1e0fffff;
 static constexpr std::string_view TESTNET_GENESIS_HASH   = "1dc4131ed2649a4782fbb8b25423e970084c7d217f730651d93cf09f6a43ccb9"; // MetalDAG PoW hash 000001be7d866cb919cac1...
 // CURRENCY_ID (SHA-256(header || charter text), `nex-cli -testnet getcharter`) = fb9c965c9b2c61d9f1f3471d96a775f764389142b838f63c183913b38b71029e
 static constexpr std::string_view TESTNET_GENESIS_MERKLE = "9ad269fbcffc895fb038b4c9e0a932461665e9434a662226f044ffe3267a4d66";
-// Re-mined 2026-09-14 against charter 415b1dbc... (section 4, the 14 XCF schedule; the
-// earlier genesis of the day was bound to ba4554b7...). Should the charter change again
-// before launch: xcoin-genesis -chain=test, paste the printed constants, keep this true.
-static constexpr bool TESTNET_GENESIS_IS_FINAL = true;
+// The constants above are the RETIRED 2026-09-14 genesis (1dc4131e..., bound to charter
+// 415b1dbc..., the 21,000,000 XCF charter). The charter changed on 2026-09-25 (ticker XID,
+// 100,000,000 XID cap; section 4 rewritten the same day for the final Annual Tenth shape,
+// charter fd9b475a...), which moves this
+// chain's merkle root and genesis hash, so testnet A is NOT FINAL on this branch: it stands
+// on the v1 placeholder, exactly as mainnet does before its cutover, until it is re-mined:
+//     build xcoin-genesis with this flag false (as it is), then
+//     xcoin-genesis -chain=test -threads=8 \
+//         -message="xCoin testnet A - <UTC date> - 10,000,000,000,000,000 sats, 100M XID"
+// (-time defaults to now; mine it right before the rehearsal restarts, because the genesis
+// time anchors ASERT), paste MESSAGE / TIME / NONCE / HASH / MERKLE above, set this true,
+// re-pin regenesis_testnet_a_tests, TESTNET-A.md, README.md, vps/bootstrap.sh and
+// miner/MetalDAGEngine.swift (testnet baseTime), and wipe the rehearsal datadirs. The final
+// emission shape changes the charter again, so re-mine after it lands.
+static constexpr bool TESTNET_GENESIS_IS_FINAL = false;
 
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -237,8 +248,9 @@ public:
         consensus.nMinimumChainWork = uint256{};  // SET AFTER CHAIN DEPTH > 1000
         consensus.defaultAssumeValid = uint256{}; // SET AFTER CHAIN DEPTH > 1000
 
-        // Emission: 14 XCF, halved every 750,000 blocks until it reaches zero (charter
-        // section 4; consensus/params.h).
+        // Emission: EMISSION_TABLE (charter section 4; consensus/params.h), generated
+        // from contrib/regenesis/emission-policy.json. FINAL shape: the Annual Tenth, [EMISSION-SHAPE]
+        // 50 XID after a 60,000-block ramp, 10% less every 110,000 blocks from 220,001, 0.1 XID tail.
         SetMainnetEmission(consensus);
         // Only witness v3 (post-quantum script tree) outputs may be created after the
         // genesis block: bad-txout-not-pq. This chain has no witness v2 output at all.
@@ -278,6 +290,17 @@ public:
         m_assumed_blockchain_size = 0;
         m_assumed_chain_state_size = 0;
 
+        // The mainnet genesis commits to the charter, and charter section 4 states the
+        // emission shape. While that shape is PROVISIONAL (Consensus::EMISSION_SHAPE_IS_FINAL,
+        // generated from the status in contrib/regenesis/emission-policy.json), setting
+        // GENESIS_IS_FINAL = true would lock the placeholder shape into the currency identity
+        // for good, so it does not compile. The one exception is the local dress rehearsal
+        // (REHEARSAL-2.md), built with -DXCOIN_REHEARSAL_BUILD=ON; its constants are never
+        // pushed. (Here, not next to the constants, so pasting xcoin-genesis output over
+        // them cannot remove it.)
+        static_assert(!GENESIS_IS_FINAL || Consensus::EMISSION_SHAPE_IS_FINAL || IS_REHEARSAL_BUILD,
+                      "GENESIS_IS_FINAL = true while the emission shape is PROVISIONAL: install the final shape first "
+                      "(contrib/regenesis/EMISSION-SHAPE-SPOTS.md), or build the local rehearsal with -DXCOIN_REHEARSAL_BUILD=ON");
         m_genesis_is_final = GENESIS_IS_FINAL;
         if constexpr (GENESIS_IS_FINAL) {
             // The v2 genesis: charter commitment in the coinbase, MetalDAG-mined by xcoin-genesis.
@@ -288,7 +311,8 @@ public:
             assert(charter::HasCommitment(*genesis.vtx[0]));
             assert(consensus.hashGenesisBlock != Consensus::V1_GENESIS_HASH);
         } else {
-            // Placeholder until the cutover: the v1 genesis, so the chain is identifiable but unlaunchable.
+            // Placeholder until the cutover: the v1 genesis, so the chain is identifiable. A node
+            // refuses to start on it (CheckGenesisFinalityForStartup) unless -allowunfinalgenesis is given.
             genesis = CreatePQGenesisBlock(V1_GENESIS_MESSAGE, V1_GENESIS_TIME, V1_GENESIS_NONCE, V1_GENESIS_BITS, 1);
             consensus.hashGenesisBlock = genesis.GetHash();
             assert(consensus.hashGenesisBlock == Consensus::V1_GENESIS_HASH);
@@ -435,7 +459,7 @@ public:
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
-        // The mainnet emission table (14 XCF, halved every 750,000 blocks).
+        // The mainnet emission table (FINAL shape: the Annual Tenth, 65 rows). [EMISSION-SHAPE]
         SetMainnetEmission(consensus);
         consensus.permitV2Outputs = false; // as mainnet: v2 outputs are invalid
         consensus.settlementLevySchedule = {Consensus::SETTLEMENT_LEVY_GENESIS_RULE}; // as mainnet: no levy
@@ -464,8 +488,11 @@ public:
             assert(charter::HasCommitment(*genesis.vtx[0]));
             assert(consensus.hashGenesisBlock != Consensus::V1_GENESIS_HASH);
         } else {
-            // Placeholder until testnet is re-mined: the v1 genesis, exactly as mainnet
-            // stands in before its own cutover — identifiable, unlaunchable.
+            // Placeholder until testnet A is re-mined: the v1 genesis, exactly as mainnet
+            // stands in before its own cutover. Identifiable, and refused at startup
+            // (CheckGenesisFinalityForStartup) unless -allowunfinalgenesis is given: a node
+            // started on it would open a new chain on the v1 header, its difficulty anchored
+            // at 2026-09-01, and its seed peers are on a different genesis.
             genesis = CreatePQGenesisBlock(V1_GENESIS_MESSAGE, V1_GENESIS_TIME, V1_GENESIS_NONCE, V1_GENESIS_BITS, 1);
             consensus.hashGenesisBlock = genesis.GetHash();
             assert(consensus.hashGenesisBlock == Consensus::V1_GENESIS_HASH);
@@ -507,31 +534,32 @@ public:
 };
 
 /**
- * Regtest emission: the mainnet shape (one era at the era-0 rate, three
- * halvings on eras of the same length, the last rate running until the cap,
- * dust on the final block) with Bitcoin-regtest 150-block eras and S0 = 50 XCF,
- * so fixtures keep the familiar 50 XCF coinbase for heights 1..150 and the
- * first halving at 151 (block 1 is an ordinary block; the eras start at height
- * 1 like every chain's). The 6.25 XCF tail divides the remainder exactly, so
- * the regtest dust is 0.
+ * Regtest emission: a fixture table, independent of the mainnet shape (which is
+ * PROVISIONAL and generated, consensus/params.h). Bitcoin-regtest 150-block
+ * eras at 50 / 25 / 12.5 / 6.25 XID, so the inherited fixtures keep the familiar
+ * 50-coin coinbase for heights 1..150 and the first halving at 151 (block 1 is
+ * an ordinary block; the eras start at height 1 like every chain's); the last
+ * rate runs until the same 100,000,000 XID cap. The 6.25 XID tail divides the
+ * remainder exactly ((100,000,000 - 13,125) / 6.25 = 15,997,900 blocks), so the
+ * regtest dust is 0 and the last subsidy block is 15,998,350.
  */
 static constexpr int REGTEST_EMISSION_ERA_BLOCKS = 150;
 static constexpr int64_t REGTEST_EMISSION_CLOSING_DUST_SAT = 0LL;
 static constexpr int REGTEST_NUM_EMISSION_ERAS = 4; // regtest keeps its own 50 / 25 / 12.5 / 6.25 table for the inherited fixtures
 static constexpr Consensus::EmissionEra REGTEST_EMISSION_TABLE[REGTEST_NUM_EMISSION_ERAS] = {
     //  startHeight  endHeight  baseSubsidy(sat)
-    {         1,       150,  5000000000LL },  // era  0: 50.00000000 XCF x 150 blocks
-    {       151,       300,  2500000000LL },  // era  1: 25.00000000 XCF x 150 blocks
-    {       301,       450,  1250000000LL },  // era  2: 12.50000000 XCF x 150 blocks
-    {       451,   3358350,   625000000LL },  // era  3: 6.25000000 XCF x 3,357,900 blocks (runs to the cap)
+    {         1,       150,  5000000000LL },  // era  0: 50.00000000 XID x 150 blocks
+    {       151,       300,  2500000000LL },  // era  1: 25.00000000 XID x 150 blocks
+    {       301,       450,  1250000000LL },  // era  2: 12.50000000 XID x 150 blocks
+    {       451,  15998350,   625000000LL },  // era  3: 6.25000000 XID x 15,997,900 blocks (runs to the cap)
 };
 // Regtest emission starts at height 1 like every chain: block 1 is an ordinary block.
 static_assert(Consensus::EmissionTableContiguous(REGTEST_EMISSION_TABLE, REGTEST_NUM_EMISSION_ERAS, Consensus::EMISSION_START_HEIGHT, REGTEST_EMISSION_ERA_BLOCKS),
               "regtest emission table must be four back-to-back eras from height 1: three of 150 blocks, the last at least that long");
-static_assert(REGTEST_EMISSION_TABLE[0].baseSubsidy == 50 * COIN, "regtest era 0 pays 50 XCF");
+static_assert(REGTEST_EMISSION_TABLE[0].baseSubsidy == 50 * COIN, "regtest era 0 pays 50 XID");
 static_assert(Consensus::EmissionTableHalves(REGTEST_EMISSION_TABLE, REGTEST_NUM_EMISSION_ERAS), "regtest eras halve exactly");
 static_assert(Consensus::EmissionTableTotalSat(REGTEST_EMISSION_TABLE, REGTEST_NUM_EMISSION_ERAS) + REGTEST_EMISSION_CLOSING_DUST_SAT == Consensus::MAX_SUPPLY_SAT,
-              "regtest emission must be exactly 21,000,000 XCF");
+              "regtest emission must be exactly 100,000,000 XID");
 
 /**
  * Regression test: intended for private networks only. Has minimal difficulty to ensure that
@@ -637,6 +665,10 @@ public:
 
         // Regtest genesis: PQ genesis (witness-v2 output) so it passes the
         // Xcoin PQ-only output rule. Trivial powLimit → nonce 2 is valid.
+        // The message keeps the retired ticker and the old cap on purpose: it is
+        // a test fixture, not a statement of the rules, and every regtest block
+        // hash descends from it (the assumeutxo entries below, the functional
+        // test snapshots). Changing it would re-pin all of them for no gain.
         genesis = CreatePQGenesisBlock("Xcoin XCF - post-quantum money, 21M, secured by Bitcoin - 2026-08-29",
                                        1296688602, 2, 0x207fffff, 1);
         consensus.hashGenesisBlock = genesis.GetHash();
@@ -736,11 +768,22 @@ std::vector<int> CChainParams::GetAvailableSnapshotHeights() const
 
 std::optional<std::string> CheckGenesisFinalityForStartup(const CChainParams& params, bool allow_unfinal_genesis)
 {
-    if (params.GetChainType() != ChainType::MAIN || params.GenesisIsFinal() || allow_unfinal_genesis) return std::nullopt;
-    return strprintf("Refusing to start on mainnet: this build's v2 genesis is not final (GENESIS_IS_FINAL is false; the v1 genesis %s stands in as a placeholder, contrib/regenesis/REGENESIS.md section 8 step 3). "
-                     "Paste the xcoin-genesis output into src/kernel/chainparams.cpp and rebuild, or run the dress rehearsal with -testnet. "
-                     "Only for the cutover dry run: -allowunfinalgenesis=1 overrides this refusal.",
-                     params.GetConsensus().hashGenesisBlock.ToString());
+    if (params.GenesisIsFinal() || allow_unfinal_genesis) return std::nullopt;
+    switch (params.GetChainType()) {
+    case ChainType::MAIN:
+        return strprintf("Refusing to start on mainnet: this build's v2 genesis is not final (GENESIS_IS_FINAL is false; the v1 genesis %s stands in as a placeholder, contrib/regenesis/REGENESIS.md section 8 step 3). "
+                         "Paste the xcoin-genesis output into src/kernel/chainparams.cpp and rebuild; the one-Mac dress rehearsal is contrib/regenesis/REHEARSAL-2.md. "
+                         "Only for the cutover dry run: -allowunfinalgenesis=1 overrides this refusal.",
+                         params.GetConsensus().hashGenesisBlock.ToString());
+    case ChainType::TESTNET:
+        return strprintf("Refusing to start on testnet A: this build's testnet A genesis is not final (TESTNET_GENESIS_IS_FINAL is false; the v1 genesis %s stands in as a placeholder until testnet A is re-mined for the current charter, contrib/regenesis/TESTNET-A.md). "
+                         "A node started on it would open a new chain on the v1 header, apart from every peer. "
+                         "Only for tests and dry runs that never peer: -allowunfinalgenesis=1 overrides this refusal.",
+                         params.GetConsensus().hashGenesisBlock.ToString());
+    case ChainType::REGTEST:
+        return std::nullopt;
+    } // no default case, so the compiler can warn about missing cases
+    return std::nullopt;
 }
 
 std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& message)

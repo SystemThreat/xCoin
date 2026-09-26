@@ -291,6 +291,13 @@ BOOST_AUTO_TEST_CASE(rpc_parse_monetary_values)
     BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("1.00000000")), 100000000LL);
     BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("20999999.9999999")), 2099999999999990LL);
     BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("20999999.99999999")), 2099999999999999LL);
+    // The cap (100,000,000 XID, MAX_MONEY): exactly the cap parses, one sat more is out of range.
+    BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("100000000.00000000")), MAX_MONEY);
+    BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("100000000")), MAX_MONEY);
+    BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("99999999.99999999")), MAX_MONEY - 1);
+    BOOST_CHECK_EXCEPTION(AmountFromValue(ValueFromString("100000000.00000001")), UniValue,
+                          HasJSON(R"({"code":-3,"message":"Amount out of range"})"));
+    BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("21000000.00000001")), 2100000000000001LL); // the old 21M cap no longer binds
 
     BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("1e-8")), COIN/100000000);
     BOOST_CHECK_EQUAL(AmountFromValue(ValueFromString("0.1e-7")), COIN/100000000);

@@ -56,3 +56,4 @@ class TestFrameworkCompressor(unittest.TestCase):
         check_amount(COIN, 0x9)
         check_amount(50*COIN, 0x32)
         check_amount(21000000*COIN, 0x1406f40)
+        check_amount(100000000*COIN, 0x5f5e100)  # MAX_MONEY, the 100,000,000 XID cap

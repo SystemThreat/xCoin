@@ -3884,9 +3884,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         auto new_peer_msg = [&]() {
             const auto mapped_as{m_connman.GetMappedAS(pfrom.addr)};
-            return strprintf("New %s peer connected: transport: %s, version: %d, %s%s",
+            const auto transport{pfrom.m_transport->GetInfo()};
+            return strprintf("New %s peer connected: transport: %s%s, version: %d, %s%s",
                 pfrom.ConnectionTypeAsString(),
-                TransportTypeAsString(pfrom.m_transport->GetInfo().transport_type),
+                TransportTypeAsString(transport.transport_type),
+                transport.transport_type == TransportProtocolType::V2 ? (transport.hybrid ? " (hybrid)" : " (classical)") : "",
                 pfrom.nVersion.load(), pfrom.LogPeer(),
                 (mapped_as ? strprintf(", mapped_as=%d", mapped_as) : ""));
         };

@@ -12,6 +12,7 @@
 #include <util/chaintype.h>
 #include <validation.h>
 
+#include <limits>
 #include <string>
 
 #include <test/util/setup_common.h>
@@ -19,34 +20,30 @@
 #include <boost/test/unit_test.hpp>
 
 // ── xCoin emission tests use BasicTestingSetup (no chain bootstrap needed) ───
-// Re-genesis (2026-09-05): the flat 50 XCF/block schedule became the era table
-// of consensus/params.h (exactly 33 XCF, three halvings, era 3 runs to the cap;
-// no premine), nothing is carried in (35c4fda), so eras start at height 1 and
-// block 1 is an ordinary era-0 block; the expectations below follow
-// (regenesis_tests.cpp covers the boundaries in depth).
+// The cap is DECIDED: 100,000,000 XID of 10^8 sat (owner decision 2026-09-25).
+// The SHAPE of the table is FINAL (the Annual Tenth) and generated (consensus/params.h,
+// contrib/regenesis/emission.py); everything here holds for any table the
+// policy generates; the shape itself is pinned in exactly one place,
+// regenesis_tests/annual_tenth_emission_shape. Nothing is carried in (35c4fda):
+// rows start at height 1 and block 1 is an ordinary block.
 BOOST_FIXTURE_TEST_SUITE(nex_emission_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(nex_emission_era_table_consistency)
 {
-    // Four back-to-back eras from height 1 (genesis mints nothing): three of
-    // EMISSION_ERA_BLOCKS, the last one running to the cap; every era pays
-    // exactly half of the previous one.
-    static_assert(Consensus::NUM_EMISSION_ERAS == 31); // 14 XCF halved until the shift reaches zero
+    // Back-to-back, non-empty rows from height 1 (genesis mints nothing), each
+    // paying a positive subsidy; the last row ends at EMISSION_END_HEIGHT.
+    static_assert(Consensus::NUM_EMISSION_ERAS > 0);
     BOOST_CHECK_EQUAL(Consensus::EMISSION_START_HEIGHT, 1);
     BOOST_CHECK_EQUAL(Consensus::EMISSION_TABLE[0].startHeight, Consensus::EMISSION_START_HEIGHT);
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_TABLE[0].baseSubsidy, 14 * COIN);
     for (int i = 0; i < Consensus::NUM_EMISSION_ERAS; ++i) {
         const auto& era = Consensus::EMISSION_TABLE[i];
-        const int blocks = era.endHeight - era.startHeight + 1;
-        if (i < Consensus::NUM_EMISSION_ERAS - 1) {
-            BOOST_CHECK_EQUAL(blocks, Consensus::EMISSION_ERA_BLOCKS);
-        } else {
-            BOOST_CHECK(blocks >= Consensus::EMISSION_ERA_BLOCKS);
-        }
+        BOOST_CHECK(era.endHeight >= era.startHeight);
+        BOOST_CHECK(era.baseSubsidy > 0);
+        BOOST_CHECK(era.baseSubsidy <= MAX_MONEY);
         if (i > 0) BOOST_CHECK_EQUAL(era.startHeight, Consensus::EMISSION_TABLE[i - 1].endHeight + 1);
-        if (i > 0) BOOST_CHECK_EQUAL(era.baseSubsidy, Consensus::EMISSION_TABLE[i - 1].baseSubsidy / 2);
     }
     BOOST_CHECK_EQUAL(Consensus::EMISSION_TABLE[Consensus::NUM_EMISSION_ERAS - 1].endHeight, Consensus::EMISSION_END_HEIGHT);
+    BOOST_CHECK(Consensus::EmissionTableWellFormed(Consensus::EMISSION_TABLE, Consensus::NUM_EMISSION_ERAS, Consensus::EMISSION_START_HEIGHT));
 }
 
 BOOST_AUTO_TEST_CASE(nex_emission_exact_total)
@@ -60,7 +57,7 @@ BOOST_AUTO_TEST_CASE(nex_emission_exact_total)
     }
     totalEmission += Consensus::EMISSION_CLOSING_DUST_SAT;
     BOOST_CHECK_EQUAL(totalEmission, Consensus::TOTAL_EMISSION_SAT);
-    BOOST_CHECK_EQUAL(totalEmission, CAmount{2'100'000'000'000'000LL}); // 21,000,000 XCF: the whole cap, no premine, nothing carried
+    BOOST_CHECK_EQUAL(totalEmission, CAmount{10'000'000'000'000'000LL}); // 100,000,000 XID: the whole cap, no premine, nothing carried
 }
 
 BOOST_AUTO_TEST_CASE(nex_emission_via_getblocksubsidy)
@@ -68,19 +65,22 @@ BOOST_AUTO_TEST_CASE(nex_emission_via_getblocksubsidy)
     const auto chainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
     const auto& cp = chainParams->GetConsensus();
 
-    // Genesis mints nothing; block 1 is an ordinary era-0 block (no distribution).
+    // Genesis mints nothing; block 1 is an ordinary first-row block (no distribution).
     BOOST_CHECK_EQUAL(GetBlockSubsidy(0, cp), 0);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(1, cp), Consensus::EMISSION_TABLE[0].baseSubsidy);
-    // Era subsidies from height 1, halving every EMISSION_ERA_BLOCKS.
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(2, cp), Consensus::EMISSION_TABLE[0].baseSubsidy);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(123456, cp), Consensus::EMISSION_TABLE[0].baseSubsidy);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_ERA_BLOCKS, cp), Consensus::EMISSION_TABLE[0].baseSubsidy);     // last of era 0
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(1 + Consensus::EMISSION_ERA_BLOCKS, cp), Consensus::EMISSION_TABLE[1].baseSubsidy); // first of era 1
+    // Every row pays its subsidy at both ends; the next row takes over the block after.
+    for (int i = 0; i < Consensus::NUM_EMISSION_ERAS; ++i) {
+        const auto& e = Consensus::EMISSION_TABLE[i];
+        const bool last{i == Consensus::NUM_EMISSION_ERAS - 1};
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(e.startHeight, cp), e.baseSubsidy);
+        BOOST_CHECK_EQUAL(GetBlockSubsidy(e.endHeight, cp), e.baseSubsidy + (last ? Consensus::EMISSION_CLOSING_DUST_SAT : 0));
+        if (!last) BOOST_CHECK_EQUAL(GetBlockSubsidy(e.endHeight + 1, cp), Consensus::EMISSION_TABLE[i + 1].baseSubsidy);
+    }
     BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_END_HEIGHT, cp),
                       Consensus::EMISSION_TABLE[Consensus::NUM_EMISSION_ERAS - 1].baseSubsidy + Consensus::EMISSION_CLOSING_DUST_SAT);
     // After the end: fees only.
     BOOST_CHECK_EQUAL(GetBlockSubsidy(Consensus::EMISSION_END_HEIGHT + 1, cp), 0);
-    BOOST_CHECK_EQUAL(GetBlockSubsidy(100'000'000, cp), 0);
+    BOOST_CHECK_EQUAL(GetBlockSubsidy(std::numeric_limits<int>::max(), cp), 0);
     // Negative height: zero.
     BOOST_CHECK_EQUAL(GetBlockSubsidy(-1, cp), 0);
 }
@@ -91,19 +91,22 @@ BOOST_AUTO_TEST_CASE(nex_emission_total)
     const auto& cp = chainParams->GetConsensus();
     CAmount total{0};
     for (int h = 0; h <= Consensus::EMISSION_END_HEIGHT; ++h) total += GetBlockSubsidy(h, cp);
-    // 21,000,000 XCF emitted exactly; there is no premine and nothing is carried in.
+    // 100,000,000 XID emitted exactly; there is no premine and nothing is carried in.
     BOOST_CHECK_EQUAL(total, Consensus::MAX_SUPPLY_SAT);
     BOOST_CHECK_EQUAL(total, MAX_MONEY);
 }
 
 BOOST_AUTO_TEST_CASE(nex_supply_cap_constants)
 {
-    // emission = 21M max: the whole schedule in one identity; no premine, nothing carried in.
+    // DECIDED 2026-09-25: the cap is exactly 100,000,000 XID of 10^8 sat, it is
+    // also the consensus MAX_MONEY bound, and the emission is the whole of it.
+    BOOST_CHECK_EQUAL(COIN, CAmount{100'000'000LL});
     BOOST_CHECK_EQUAL(Consensus::TOTAL_EMISSION_SAT, Consensus::MAX_SUPPLY_SAT);
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_ERA0_SUBSIDY_SAT, 14 * COIN);
-    BOOST_CHECK_EQUAL(Consensus::MAX_SUPPLY_SAT, CAmount{2'100'000'000'000'000LL});
+    BOOST_CHECK_EQUAL(Consensus::MAX_SUPPLY_SAT, CAmount{10'000'000'000'000'000LL});
+    BOOST_CHECK_EQUAL(Consensus::MAX_SUPPLY_SAT, 100'000'000 * COIN);
     BOOST_CHECK_EQUAL(Consensus::MAX_SUPPLY_SAT, MAX_MONEY);
-    BOOST_CHECK_EQUAL(Consensus::EMISSION_END_HEIGHT, 23'250'000); // ~2248 at 300 s; the subsidy fades, it does not stop
+    // Under one XID of rounding is all the closing remainder may be.
+    BOOST_CHECK(Consensus::EMISSION_CLOSING_DUST_SAT >= 0 && Consensus::EMISSION_CLOSING_DUST_SAT < COIN);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

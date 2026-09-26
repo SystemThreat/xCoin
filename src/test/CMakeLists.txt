@@ -50,6 +50,7 @@ add_executable(test_bitcoin
   hash_tests.cpp
   headers_sync_chainwork_tests.cpp
   httpserver_tests.cpp
+  hx1_transport_tests.cpp
   i2p_tests.cpp
   interfaces_tests.cpp
   key_io_tests.cpp
@@ -105,6 +106,7 @@ add_executable(test_bitcoin
   sigopcount_tests.cpp
   skiplist_tests.cpp
   ml_dsa_kat_tests.cpp
+  mlkem768_tests.cpp
   slhkey_tests.cpp
   sock_tests.cpp
   span_tests.cpp
@@ -151,9 +153,11 @@ target_json_data_sources(test_bitcoin
   data/base58_encode_decode.json
   data/bip341_wallet_vectors.json
   data/blockfilters.json
+  data/hx1_handshake_vectors.json
   data/key_io_invalid.json
   data/key_io_valid.json
   data/ml_dsa_65_fips204.json
+  data/ml_kem_768_fips203.json
   data/script_tests.json
   data/sighash.json
   data/slh_dsa_sha2_128s_vectors.json
@@ -202,9 +206,23 @@ function(add_boost_test source_file)
   )
   # The mock_process test suite does not contain unit tests.
   list(REMOVE_ITEM test_suite_macro "mock_process")
+  # Selecting a suite with --run_test also enables its test cases marked
+  # boost::unit_test::disabled(), which a plain test_bitcoin run skips, so
+  # exclude those explicitly.
+  string(REGEX
+    MATCHALL "BOOST_[A-Z_]*TEST_CASE\\([A-Za-z0-9_]+[^\n;]*boost::unit_test::disabled\\(\\)"
+    disabled_test_cases "${source_file_content}"
+  )
+  list(TRANSFORM disabled_test_cases
+    REPLACE "^BOOST_[A-Z_]*TEST_CASE\\(([A-Za-z0-9_]+).*$" "\\1"
+  )
   foreach(test_suite_name IN LISTS test_suite_macro)
+    set(run_test_filter ${test_suite_name})
+    foreach(test_case_name IN LISTS disabled_test_cases)
+      string(APPEND run_test_filter ":!${test_suite_name}/${test_case_name}")
+    endforeach()
     add_test(NAME ${test_suite_name}
-      COMMAND test_bitcoin --run_test=${test_suite_name} --catch_system_error=no --log_level=test_suite -- -printtoconsole=1
+      COMMAND test_bitcoin --run_test=${run_test_filter} --catch_system_error=no --log_level=test_suite -- -printtoconsole=1
     )
     set_property(TEST ${test_suite_name} PROPERTY
       SKIP_REGULAR_EXPRESSION

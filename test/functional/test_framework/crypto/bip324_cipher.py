@@ -5,15 +5,24 @@
 
 """Test-only implementation of ChaCha20 Poly1305 AEAD Construction in RFC 8439 and FSChaCha20Poly1305 for BIP 324
 
+It also holds the parts of XIP-4 (HX1, the hybrid post-quantum upgrade of the
+v2 transport) that are plain functions: the version-packet record format and
+the stage-2 key schedule. The HX1 state machine is in test_framework/v2_p2p.py.
+
 It is designed for ease of understanding, not performance.
 
 WARNING: This code is slow and trivially vulnerable to side channel attacks. Do not use for
 anything but tests.
 """
 
+import hashlib
+import hmac
+import random
 import unittest
 
 from .chacha20 import chacha20_block, REKEY_INTERVAL
+from .hkdf import hkdf_sha256
+from .mlkem import CT_SIZE, EK_SIZE, SS_SIZE, encaps_internal, keygen_internal
 from .poly1305 import Poly1305
 
 
@@ -86,6 +95,96 @@ class FSChaCha20Poly1305:
 
     def encrypt(self, aad, plaintext):
         return self._crypt(aad, plaintext, False)
+
+
+# XIP-4 (HX1): version-packet records and the stage-2 key schedule.
+#
+# A v2 version packet's contents are either empty or one HX1 record:
+#   tag (8) || version (1) || kind (1) || body length (2, little-endian) || body
+# The responder's version packet (VP_R) carries an OFFER whose body is the
+# ML-KEM-768 encapsulation key ek; the initiator's (VP_I) carries an ACCEPT
+# whose body is the ML-KEM-768 ciphertext ct.
+
+HX1_TAG = b"xcoin-pq"  # 78 63 6f 69 6e 2d 70 71
+HX1_VERSION = 0x01
+HX1_KIND_OFFER = 0x01
+HX1_KIND_ACCEPT = 0x02
+HX1_HEADER_LEN = 12
+HX1_BODY_LEN = {HX1_KIND_OFFER: EK_SIZE, HX1_KIND_ACCEPT: CT_SIZE}
+
+# How a received version packet is classified (XIP-4, "Version packet contents").
+HX1_NONE = "none"            # the peer is classical, or speaks an extension we don't know
+HX1_MALFORMED = "malformed"  # our tag and version, but the rest is wrong: disconnect
+HX1_RECORD = "hx1"           # a well-formed record of the expected kind
+
+HX1_SALT_PREFIX = b"xcoin_v2_hybrid_mlkem768"
+HX1_LABELS = (
+    "xcoin_hx1_initiator_L",
+    "xcoin_hx1_initiator_P",
+    "xcoin_hx1_responder_L",
+    "xcoin_hx1_responder_P",
+    "xcoin_hx1_session_id",
+)
+# The stage-1 (BIP324) HKDF labels. No stage-2 label may equal one of these.
+BIP324_LABELS = ("initiator_L", "initiator_P", "responder_L", "responder_P", "garbage_terminators", "session_id")
+ELLSWIFT_LEN = 64
+
+
+def hx1_encode_record(kind, body):
+    """Build the one HX1 record a mode 1 or 2 sender puts in its version packet."""
+    assert kind in HX1_BODY_LEN and len(body) == HX1_BODY_LEN[kind]
+    return HX1_TAG + bytes([HX1_VERSION, kind]) + len(body).to_bytes(2, 'little') + bytes(body)
+
+
+def hx1_classify_record(contents, expected_kind):
+    """Classify received version-packet contents as XIP-4's table does.
+
+    The rows are exclusive and are decided from the front of the contents:
+    - fewer than 9 bytes, or the first 8 bytes are not the tag: "none";
+    - the tag, then a version byte other than 01: "none";
+    - the tag and version 01: either exactly the expected record (HX1_RECORD)
+      or "malformed". That includes contents that end inside the 12-byte
+      header: only a broken HX1 sender produces the tag and version 01 and
+      then stops.
+
+    Returns (classification, body); body is None unless the classification is
+    HX1_RECORD. Only the first record is read: bytes after its body are
+    ignored, so a later version that offers several records puts the HX1
+    record first.
+    """
+    contents = bytes(contents)
+    if len(contents) < len(HX1_TAG) + 1 or contents[:len(HX1_TAG)] != HX1_TAG:
+        return HX1_NONE, None
+    if contents[8] != HX1_VERSION:
+        return HX1_NONE, None
+    if len(contents) < HX1_HEADER_LEN:
+        return HX1_MALFORMED, None
+    body_len = int.from_bytes(contents[10:12], 'little')
+    if (contents[9] != expected_kind or body_len != HX1_BODY_LEN[expected_kind] or
+            len(contents) < HX1_HEADER_LEN + body_len):
+        return HX1_MALFORMED, None
+    return HX1_RECORD, contents[HX1_HEADER_LEN:HX1_HEADER_LEN + body_len]
+
+
+def hx1_stage2_ikm(kem_secret, ecdh_secret, ct, ell_initiator, ek, ell_responder):
+    """IKM2 = K || ecdh_secret || ct || ell_I || ek || ell_R (2464 bytes)."""
+    assert len(kem_secret) == SS_SIZE and len(ecdh_secret) == 32
+    assert len(ct) == CT_SIZE and len(ek) == EK_SIZE
+    assert len(ell_initiator) == ELLSWIFT_LEN and len(ell_responder) == ELLSWIFT_LEN
+    return bytes(kem_secret) + bytes(ecdh_secret) + bytes(ct) + bytes(ell_initiator) + bytes(ek) + bytes(ell_responder)
+
+
+def hx1_stage2_keys(magic, kem_secret, ecdh_secret, ct, ell_initiator, ek, ell_responder):
+    """Derive the four stage-2 packet keys and the stage-2 session id.
+
+    HKDF-SHA256 with salt "xcoin_v2_hybrid_mlkem768" || MessageStart over
+    IKM2; one 32-byte output per label in HX1_LABELS. Returns a dict keyed by
+    label.
+    """
+    assert len(magic) == 4
+    salt = HX1_SALT_PREFIX + magic
+    ikm = hx1_stage2_ikm(kem_secret, ecdh_secret, ct, ell_initiator, ek, ell_responder)
+    return {label: hkdf_sha256(length=32, ikm=ikm, salt=salt, info=label.encode('ascii')) for label in HX1_LABELS}
 
 
 # Test vectors from RFC8439 consisting of plaintext, aad, 32 byte key, 12 byte nonce and ciphertext
@@ -201,3 +300,135 @@ class TestFrameworkAEAD(unittest.TestCase):
                 dec_aead.decrypt(b"", None)
             plaintext = dec_aead.decrypt(aad, ciphertext)
             self.assertEqual(plain, plaintext)
+
+
+# XIP-4 test vector inputs: each value is SHA-256 of "XIP-4 test vector: " and
+# a name (the garbage values are truncated). See XIP-4, "Handshake vectors".
+HX1_TEST_ELL_I = bytes.fromhex(
+    "77912a89a57b3a2991c56274b9b24aa672b12e7f4a70653ca7e521ec614971ce"
+    "7a438fee0858c46d0b32e28e0d8510f937c26c57d2e1ab274c066e362c7248f8")
+HX1_TEST_ELL_R = bytes.fromhex(
+    "2163a7d9fb5c171c53cd06a7d1bc390a8c6343bba7fbe273aeadb3ce8d9d0cc9"
+    "d1fdb6dd34f6257fa3b07216374b9ac60edb585ff4e48bc5362561bb943abc1d")
+HX1_TEST_ECDH = bytes.fromhex("cbf5296f35d2840f8f0f31d58e01a626b6d69b31c846b8212c3ec1701499637f")
+HX1_TEST_D = bytes.fromhex("944becfa471193433f423fb1e6459505957eace2a3a2343ae25f84c5d602cb46")
+HX1_TEST_Z = bytes.fromhex("101ca7e793947879e8c8a02911faea5f4f5b021b1f0a0c91911028159051dfcb")
+HX1_TEST_M = bytes.fromhex("b21100cd8bfa86e05d3416452f314a1f99e61303273c8e9afc78f77cf5e2b066")
+
+# Stage-2 key schedule results for those inputs (XIP-4 vectors V1, V2, V3):
+# magic, PRK2, then the outputs for the five labels in HX1_LABELS order.
+HX1_KEY_SCHEDULE_TESTS = [
+    ["58504103",
+     "9ad96f028414d8f6123c3457c230c80212ac166967ae431f656591c135b7c1fc",
+     ["987c7721b507dc6f05b1e9c4795427201713f706fe5029dad2bd5a6fb62b2c2b",
+      "0b7ec1c95c5cc68dfdaf3db50685d7841e18db6cd28a3ad01b80989d3316e82d",
+      "abba444b3e09cf7ce781b354a2e1ae128f79548528309edd98de103830885e83",
+      "9882cd2296fe9dc8d8273830629724e6d283fa42dee53aa24e36b1a28e1bab93",
+      "383be571688a04d73885796b0616b9f30789118387aa798ab720c564015f26d6"]],
+    ["58544102",
+     "8ea3919a3c840d49392b4ed9b15b07fc54570c97373a37773e028bd9c492f38f",
+     ["2bf855034819622472dcbd10e24eaf1bb6cd1d0aebee002453ed9b9e344b12bd",
+      "87d3d959947ab80596e8d3a2083e51815fab5fae38dd2010a1100dfcf096341f",
+      "d7cb71567d3028e7ee67702496d2a87f4dcc327874671fd8fb8956437227e363",
+      "d57ce9d3dd9f7653d4e45e67f0126f373f00b06c8cc68b11dcd4e21d7cd332ef",
+      "3c9db0655f576822d9141707787bb6cf6c0f5603f1cf8ab0e24c934fe60c0ab4"]],
+    ["4e455803",
+     "002dd412a9591af8590a0e2ba2d13f1f6fa0aaa8e201562bf1fde7cacbc441ab",
+     ["2558ea2689c1e9cff7a6d016932d3a404b255972eaebeda6568e0561f3518872",
+      "5793a72a7db9352e79411e31934d6e9521e8714f9c921717995c4ef322413c12",
+      "dfb3e0502c93095beb482cf54daf789e552fb5cd3de496b34f6b6cef0c7b7260",
+      "b5bab6379b46b66fa8891134b8fe1e83e4e8cf6c0b8888335d4fdf8efa6e7ff8",
+      "f701ac8116eef5eafcb1fae255f72c00236328370dd774fd1f3074170e257a09"]],
+]
+
+
+class TestFrameworkHX1(unittest.TestCase):
+    def test_record_encoding(self):
+        """OFFER and ACCEPT records have the XIP-4 header and sizes."""
+        offer = hx1_encode_record(HX1_KIND_OFFER, bytes(EK_SIZE))
+        accept = hx1_encode_record(HX1_KIND_ACCEPT, bytes(CT_SIZE))
+        self.assertEqual(offer[:12].hex(), "78636f696e2d70710101a004")
+        self.assertEqual(accept[:12].hex(), "78636f696e2d707101024004")
+        self.assertEqual((len(offer), len(accept)), (1196, 1100))
+        # Each record is one BIP324 packet: 3 length bytes, 1 header byte, 16 tag bytes.
+        self.assertEqual((len(offer) + 20, len(accept) + 20), (1216, 1120))
+
+    def test_record_classification(self):
+        """Every row of the XIP-4 classification table, for both directions."""
+        for kind, other in ((HX1_KIND_OFFER, HX1_KIND_ACCEPT), (HX1_KIND_ACCEPT, HX1_KIND_OFFER)):
+            body = bytes(range(256)) * 5
+            body = body[:HX1_BODY_LEN[kind]]
+            record = hx1_encode_record(kind, body)
+            length = record[10:12]
+            self.assertEqual(hx1_classify_record(record, kind), (HX1_RECORD, body))
+            # Trailing bytes are ignored.
+            self.assertEqual(hx1_classify_record(record + b"\x00", kind), (HX1_RECORD, body))
+            self.assertEqual(hx1_classify_record(record + record, kind), (HX1_RECORD, body))
+            # Only the first record is read: a later version that offers several must put the HX1 record first.
+            later = record[:8] + b"\x02" + record[9:]
+            self.assertEqual(hx1_classify_record(record + later, kind), (HX1_RECORD, body))
+            self.assertEqual(hx1_classify_record(later + record, kind), (HX1_NONE, None))
+            # "none": empty, short, not our tag, or not our version.
+            self.assertEqual(hx1_classify_record(b"", kind), (HX1_NONE, None))
+            for n in range(1, 9):
+                # Up to and including the bare tag: no version byte yet.
+                self.assertEqual(hx1_classify_record(record[:n], kind), (HX1_NONE, None))
+            for n in range(9, 12):
+                # The tag and version 01, then the header stops: only a broken HX1 sender does this.
+                self.assertEqual(hx1_classify_record(record[:n], kind), (HX1_MALFORMED, None))
+                self.assertEqual(hx1_classify_record(record[:8] + b"\x02" + record[9:n], kind), (HX1_NONE, None))
+            for i in range(8):
+                for bit in (0x01, 0x80):
+                    bad_tag = bytearray(record)
+                    bad_tag[i] ^= bit
+                    self.assertEqual(hx1_classify_record(bad_tag, kind), (HX1_NONE, None))
+            for version in (0x00, 0x02, 0xff):
+                self.assertEqual(hx1_classify_record(record[:8] + bytes([version]) + record[9:], kind), (HX1_NONE, None))
+            # BIP324's own tests send random contents of up to 999 bytes; they are "none".
+            rng = random.Random(kind)
+            for _ in range(100):
+                contents = rng.randbytes(rng.randrange(1000))
+                self.assertEqual(hx1_classify_record(contents, kind), (HX1_NONE, None))
+            # "malformed": tag and version match, but kind, length or body is wrong.
+            for bad_kind in (0x00, other, 0x03, 0xff):
+                self.assertEqual(hx1_classify_record(record[:9] + bytes([bad_kind]) + record[10:], kind), (HX1_MALFORMED, None))
+            for bad_len in (0, len(body) - 1, len(body) + 1, HX1_BODY_LEN[other], 0xffff):
+                bad = record[:10] + bad_len.to_bytes(2, 'little') + record[12:]
+                self.assertEqual(hx1_classify_record(bad, kind), (HX1_MALFORMED, None))
+            self.assertEqual(hx1_classify_record(record[:-1], kind), (HX1_MALFORMED, None))
+            self.assertEqual(hx1_classify_record(record[:12], kind), (HX1_MALFORMED, None))
+            self.assertEqual(length, len(body).to_bytes(2, 'little'))
+
+    def test_labels(self):
+        """Stage-2 labels are new, distinct, and not BIP324 labels."""
+        self.assertEqual(len(set(HX1_LABELS)), len(HX1_LABELS))
+        self.assertFalse(set(HX1_LABELS) & set(BIP324_LABELS))
+        self.assertEqual(HX1_SALT_PREFIX + bytes.fromhex("58504103"), b"xcoin_v2_hybrid_mlkem768XPA\x03")
+
+    def test_stage2_key_schedule(self):
+        """Stage-2 keys for the XIP-4 V1-V3 inputs, checked against the XIP and
+        against a direct HMAC-SHA256 computation."""
+        ek, _ = keygen_internal(HX1_TEST_D, HX1_TEST_Z)
+        kem_secret, ct = encaps_internal(ek, HX1_TEST_M)
+        self.assertEqual(kem_secret.hex(), "ec378be1bd4d2cc452b73ae26af3c066c3941ddf715d2bf2b09e1d5b3a7737dd")
+        ikm = hx1_stage2_ikm(kem_secret, HX1_TEST_ECDH, ct, HX1_TEST_ELL_I, ek, HX1_TEST_ELL_R)
+        self.assertEqual(len(ikm), 2464)
+        self.assertEqual(hashlib.sha256(ikm).hexdigest(), "2296bcbb7d0261abd3c78b012ebb2ee2dc96641731d03b89afa8f2f2c69c93a6")
+        for magic_hex, prk_hex, outputs in HX1_KEY_SCHEDULE_TESTS:
+            magic = bytes.fromhex(magic_hex)
+            keys = hx1_stage2_keys(magic, kem_secret, HX1_TEST_ECDH, ct, HX1_TEST_ELL_I, ek, HX1_TEST_ELL_R)
+            prk = hmac.new(HX1_SALT_PREFIX + magic, ikm, hashlib.sha256).digest()
+            self.assertEqual(prk.hex(), prk_hex)
+            for label, expected in zip(HX1_LABELS, outputs):
+                self.assertEqual(keys[label].hex(), expected)
+                self.assertEqual(hmac.new(prk, label.encode() + b"\x01", hashlib.sha256).digest(), keys[label])
+            self.assertEqual(len(set(keys.values())), len(HX1_LABELS))
+        # Every input is used: changing any one byte of any part changes every key.
+        parts = [kem_secret, HX1_TEST_ECDH, ct, HX1_TEST_ELL_I, ek, HX1_TEST_ELL_R]
+        base = hx1_stage2_keys(bytes.fromhex("58504103"), *parts)
+        for i in range(len(parts)):
+            changed = list(parts)
+            changed[i] = bytes([parts[i][0] ^ 1]) + parts[i][1:]
+            other = hx1_stage2_keys(bytes.fromhex("58504103"), *changed)
+            for label in HX1_LABELS:
+                self.assertNotEqual(other[label], base[label])

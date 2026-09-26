@@ -1,4 +1,4 @@
-// xcoin-wallet — post-quantum (ML-DSA-65) wallet for xCoin (XCF).
+// xcoin-wallet — post-quantum (ML-DSA-65) wallet for xCoin (XID).
 //
 // Buyer-facing companion to Mac Metal Miner. Generates and recovers the
 // post-quantum key that owns your mining rewards, and prints your xpa1z…
@@ -328,7 +328,7 @@ static const char* RED = "\033[38;5;197m", *DIM = "\033[2m", *B = "\033[1m", *R 
 
 static void banner() {
     fprintf(stderr, "%s%s┌─────────────────────────────────────────────┐\n"
-                    "│  xcoin-wallet · post-quantum XCF wallet     │\n"
+                    "│  xcoin-wallet · post-quantum XID wallet     │\n"
                     "│  ML-DSA-65 · deterministic · self-custody   │\n"
                     "└─────────────────────────────────────────────┘%s\n", B, RED, R);
 }

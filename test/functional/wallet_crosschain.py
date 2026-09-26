@@ -20,8 +20,10 @@ class WalletCrossChain(BitcoinTestFramework):
         # Switch node 1 to any network different from regtest before starting it
         # (xCoin testnet A: -testnet, section [test], datadir testneta).
         self.nodes[1].chain = 'testneta'
-        # Disable network sync and prevent disk space warning on low resource CI
-        self.nodes[1].extra_args = ['-maxconnections=0', '-prune=550']
+        # Disable network sync and prevent disk space warning on low resource CI.
+        # -allowunfinalgenesis=1: until testnet A is re-mined for the current charter
+        # (TESTNET_GENESIS_IS_FINAL false) a testnet A node refuses to start without it.
+        self.nodes[1].extra_args = ['-maxconnections=0', '-prune=550', '-allowunfinalgenesis=1']
         self.nodes[1].replace_in_config([('regtest=', 'testnet='), ('[regtest]', '[test]')])
         self.start_nodes()
 
@@ -45,6 +47,12 @@ class WalletCrossChain(BitcoinTestFramework):
         assert_raises_rpc_error(-18, 'Wallet file verification failed.', self.nodes[1].loadwallet, node0_wallet)
         assert_raises_rpc_error(-18, 'Wallet file verification failed.', self.nodes[0].restorewallet, 'w', node1_wallet_backup)
         assert_raises_rpc_error(-18, 'Wallet file verification failed.', self.nodes[1].restorewallet, 'w', node0_wallet_backup)
+
+        # On the placeholder genesis the testnet A node says so at startup (and nothing
+        # once testnet A's genesis is final).
+        placeholder = not self.nodes[1].getcharter()["genesis_is_final"]
+        self.stop_node(1, expected_stderr=("Warning: -allowunfinalgenesis is set: this testnet A node runs on a PLACEHOLDER genesis. "
+                                           "Cutover dry run and tests only.") if placeholder else "")
 
 
 if __name__ == '__main__':

@@ -1,12 +1,12 @@
 <p align="center">
   <img src="assets/dlt-logo.svg" width="120" alt="Distributed Ledger Technologies"><br>
-  <b>xCoin Ӿ (XCF)</b><br>
-  <i>Post-quantum proof-of-work money. XCF is xCoin Finality; Ӿ is its symbol.</i><br><br>
-  <sub>21,000,000 XCF, all of it mined · the Charter committed in the genesis block · 300-second blocks · MetalDAG</sub>
+  <b>xCoin Ӿ (XID)</b><br>
+  <i>Post-quantum proof-of-work money. XID is its ticker; Ӿ is its symbol.</i><br><br>
+  <sub>100,000,000 XID, all of it mined · the Charter committed in the genesis block · 300-second blocks · MetalDAG</sub>
 </p>
 
 <p align="center">
-  <b>Testnet A rehearsal: running</b> · Mainnet genesis: September 30, 2026<br>
+  <b>Mainnet: live since 2026-09-26 00:00 UTC</b> · Testnet A: retired<br>
   <a href="https://distributedledgertechnologies.com">Distributed Ledger Technologies</a> ·
   <a href="https://xcoinproject.com/whitepaper">Whitepaper</a> ·
   <a href="CHARTER.md">Charter</a> ·
@@ -17,19 +17,38 @@
 
 ---
 
+## Mainnet
+
+| | |
+|---|---|
+| Genesis | 2026-09-26 00:00:00 UTC |
+| Genesis hash | `3bc1a36df7d786a5c4584e21d248e0a3785a96aaa60a5b3959dfad50283379f2` |
+| Charter hash | `fd9b475afdbe178864f32802726cc60c27290c09efd472d0934b1c733d3b9340` |
+| Currency id | `e6e4ae00e1d3b25a7e4c2e94d3216d70f6b6f2e7cbd38bf23acaed391edea060` |
+| Genesis message | `Hic experimentum prosperat - 2026-09-26 - 10,000,000,000,000,000 sats, 100M XID` |
+| Emission | the Annual Tenth: 6.25 → 12.5 → 25 → 50 XID a block, then 10% less every 110,000 blocks, never below 1.5 XID; exactly 100,000,000 XID |
+| Node transport | BIP324 with hybrid ML-KEM-768 (XIP-4, `-v2hybrid`, on by default) |
+| Explorer | [superknet.com](https://superknet.com) |
+
+Check a node: `nex-cli getblockhash 0` and `nex-cli getcharter` must print the values above.
+
 xCoin is proof-of-work money that can only be spent with post-quantum signatures.
-The supply is fixed at 21,000,000 XCF and all of it is mined: there is no premine, no
+The supply is fixed at 100,000,000 XID and all of it is mined: there is no premine, no
 founder allocation and nothing carried in from anywhere. The rules the currency runs
 under are written in a short document, the Charter, and the SHA-256 of that text is
-committed in the genesis block. The protocol belongs to whoever holds XCF. There is no
+committed in the genesis block. The protocol belongs to whoever holds XID. There is no
 company behind it, nothing to license and nothing for sale; anyone may build on it.
 
 This repository holds the node (a Bitcoin Core fork), a solo mining pool, a Metal miner
 for macOS, a standalone post-quantum wallet and a browser extension.
 
 **Status: the testnet A rehearsal is running. The mainnet genesis block has not been
-mined and has no date.** Coins on testnet A have no value. Everything below runs
-against the rehearsal chain unless it says otherwise.
+mined; it is planned for November 1, 2026.** The date moved from September 30, 2026 so
+that node-to-node connections get hybrid post-quantum encryption first (ML-KEM-768
+layered on BIP324, "HX1", draft XIP-4). The 100,000,000 XID cap and the
+emission schedule below (the Annual Tenth) are decided. Coins on
+testnet A have no value. Everything below runs against the rehearsal chain unless it
+says otherwise.
 
 ## Table of contents
 
@@ -137,12 +156,16 @@ build/bin/nex-cli -testnet getpeerinfo | grep -E '"addr"|"synced_blocks"'
 
 What to expect:
 
-- `getblockhash 0` prints `1dc4131ed2649a4782fbb8b25423e970084c7d217f730651d93cf09f6a43ccb9`.
-  Anything else is a data directory from a different genesis: stop the node, delete the
-  `testneta` subdirectory and start again.
+- `getblockhash 0` prints the testnet A genesis hash. The charter changed on 2026-09-25
+  (ticker XID, 100,000,000 XID cap), so testnet A is re-mined for it before the rehearsal
+  restarts (`contrib/regenesis/TESTNET-A.md`); until then this tree stands on the v1
+  placeholder genesis. The rehearsal running today is on
+  `1dc4131ed2649a4782fbb8b25423e970084c7d217f730651d93cf09f6a43ccb9`, the genesis of the old
+  charter. Any other hash is a data directory from a different genesis: stop the node, delete
+  the `testneta` subdirectory and start again.
 - `getcharter` reports `charter_hash`
-  `415b1dbc7ff2cd14b747b300ecd95862540e12305a801bb2bfed8b93c5d84689` and
-  `genesis_is_final: true`.
+  `fd9b475afdbe178864f32802726cc60c27290c09efd472d0934b1c733d3b9340` and, once testnet A is
+  re-mined, `genesis_is_final: true` (`false` until then).
 - `getconnectioncount` is at least 1. Opening TCP 19333 on your firewall or router
   lets other nodes dial you as well; the node works without it.
 
@@ -346,7 +369,7 @@ Options: the stats URL (`http://127.0.0.1:47475` unless NerdMiner was started wi
 src/, cmake/, CMakeLists.txt, test/   the node: a Bitcoin Core fork. Binaries nexd and nex-cli.
 contrib/regenesis/CHARTER.md          the Charter, the text whose hash the genesis commits to
 contrib/regenesis/TESTNET-A.md        the rehearsal runbook: two nodes, a pool, a miner, daily checks
-contrib/regenesis/emission.py         prints the emission table and proves it sums to the cap
+contrib/regenesis/emission.py         turns emission-policy.json into the params.h table and proves it sums to the cap
 contrib/regenesis/aserti3_2d_reference.py   independent ASERT reference in exact integer arithmetic
 contrib/regenesis/vps/                bootstrap.sh, deploy.sh, pool-install.sh, pool-deploy.sh (Ubuntu 24.04)
 xcoin-pool/                           xcoin-pool.py (solo stratum pool), ws-bridge.py (browser bridge), tests
@@ -367,10 +390,10 @@ difficulty, MetalDAG sizing), `src/chainparamsbase.cpp` (RPC ports, data directo
 
 | Rule | Value |
 |---|---|
-| Unit | 1 XCF = 100,000,000 sat |
-| Supply cap | 21,000,000 XCF exactly; nothing premined, nothing carried in |
-| Block reward | 14 XCF per block from block 1, for 750,000 blocks (era 0) |
-| Halving | every 750,000 blocks, rounded down to a whole sat; 31 eras; the last subsidy block (23,250,000) pays 1 sat plus the 0.09 XCF rounding remainder, then fees only |
+| Unit | 1 XID = 100,000,000 sat |
+| Supply cap | 100,000,000 XID exactly; nothing premined, nothing carried in |
+| Block reward | the Annual Tenth (charter section 4): 6.25, 12.5, 25 XID for 20,000 blocks each, then 50 XID to block 220,000 <!-- [EMISSION-SHAPE] --> |
+| Reduction | 10% less every 110,000 blocks (~382 days), never under 1.5 XID and never more than a tenth of what is left per step; 0.1 XID tail; 65 rows; the last subsidy block (35,375,353) pays 0.1 XID plus the 0.0166 XID remainder, then fees only <!-- [EMISSION-SHAPE] --> |
 | Block interval | 300 s target |
 | Difficulty | ASERT (aserti3-2d), per block, anchored at genesis, half-life 2 h; no minimum-difficulty blocks |
 | Proof of work | MetalDAG (Keccak): 4 GiB DAG at epoch 0, +128 MiB per epoch; an epoch is 14 days from the genesis time; light cache = DAG / 128 |
@@ -391,7 +414,7 @@ The three chains:
 | Addresses | `xpa1r…` | `txa1r…` | `nxrt1r…` |
 | P2P / RPC port | 9333 / 8332 | 19333 / 19432 | 19444 / 18443 |
 | Data subdirectory | (root) | `testneta` | `regtest` |
-| Genesis | not mined | `1dc4131ed2649a4782fbb8b25423e970084c7d217f730651d93cf09f6a43ccb9` | local |
+| Genesis | not mined | to be re-mined for the 2026-09-25 charter (was `1dc4131e…ccb9`) | local |
 
 Testnet A runs the mainnet rules unchanged, down to the emission table and the DAG
 sizing; a unit test in the tree checks that line by line. Only its identity differs.
@@ -399,8 +422,8 @@ sizing; a unit test in the tree checks that line by line. Only its identity diff
 ## Charter
 
 The Charter (`CHARTER.md`, verbatim from `contrib/regenesis/CHARTER.md`) is the text
-that defines the currency: its name and units, the 21,000,000 XCF cap, the emission
-schedule, what ownership means, how history is kept, how rules may change and what
+that defines the currency: its name and units, the 100,000,000 XID cap, the emission
+schedule (section 4, the Annual Tenth, final since 2026-09-25), what ownership means, how history is kept, how rules may change and what
 the chain is for. Software, proof of work and signature algorithms are its current
 implementation and may be replaced; sections 1 through 9 of the text may not.
 
@@ -408,7 +431,7 @@ Its SHA-256 is compiled into the node as `CHARTER_HASH` in `src/consensus/params
 and written into the genesis coinbase's only output:
 
 ```
-415b1dbc7ff2cd14b747b300ecd95862540e12305a801bb2bfed8b93c5d84689
+fd9b475afdbe178864f32802726cc60c27290c09efd472d0934b1c733d3b9340
 ```
 
 Check it yourself:

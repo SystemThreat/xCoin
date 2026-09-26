@@ -1,4 +1,5 @@
 build/
+/build-*/
 .build/
 *.o
 __pycache__/
@@ -7,3 +8,4 @@ node_modules/
 wallet/xcoin-wallet
 miner/NerdMiner
 miner/MacMetalCLI
+build-*/

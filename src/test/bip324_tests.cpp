@@ -4,17 +4,27 @@
 
 #include <bip324.h>
 #include <chainparams.h>
+#include <crypto/hkdf_sha256_32.h>
+#include <crypto/hmac_sha256.h>
+#include <crypto/sha256.h>
 #include <key.h>
 #include <pubkey.h>
 #include <span.h>
+#include <support/lockedpool.h>
+#include <test/data/hx1_handshake_vectors.json.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
+#include <univalue.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <optional>
+#include <set>
+#include <string>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -158,6 +168,366 @@ void TestBIP324PacketVector(
     }
 }
 }; // struct BIP324Test
+
+// XIP-4 (HX1) helpers. The HX1 record and application packet layouts are written out here from the XIP's text,
+// independently of the node's transport code.
+
+constexpr uint8_t HX1_KIND_OFFER{0x01};
+constexpr uint8_t HX1_KIND_ACCEPT{0x02};
+
+std::vector<std::byte> HexBytes(const UniValue& hex) { return ParseHex<std::byte>(hex.get_str()); }
+
+std::string Sha256Hex(std::span<const std::byte> data)
+{
+    std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
+    CSHA256().Write(UCharCast(data.data()), data.size()).Finalize(hash.data());
+    return HexStr(hash);
+}
+
+std::span<const std::byte> PubKeySpan(const EllSwiftPubKey& pubkey) { return {pubkey.data(), pubkey.size()}; }
+
+/** The one record a mode 1 or 2 sender puts in its version packet: tag, version 01, kind, length, body. */
+std::vector<std::byte> HX1Record(uint8_t kind, std::span<const std::byte> body)
+{
+    std::vector<std::byte> record;
+    for (char c : std::string{"xcoin-pq"}) {
+        record.push_back(std::byte(c));
+    }
+    record.push_back(std::byte{0x01});
+    record.push_back(std::byte{kind});
+    record.push_back(std::byte(body.size() & 0xff));
+    record.push_back(std::byte(body.size() >> 8));
+    record.insert(record.end(), body.begin(), body.end());
+    return record;
+}
+
+/** Application packet i of the vectors: "I->R" or "R->I", then i as 4 bytes little-endian. */
+std::vector<std::byte> AppContents(bool from_initiator, uint32_t i)
+{
+    std::vector<std::byte> contents;
+    for (char c : std::string{from_initiator ? "I->R" : "R->I"}) {
+        contents.push_back(std::byte(c));
+    }
+    for (int b = 0; b < 4; ++b) {
+        contents.push_back(std::byte((i >> (8 * b)) & 0xff));
+    }
+    return contents;
+}
+
+std::vector<std::byte> EncryptPacket(BIP324Cipher& cipher, std::span<const std::byte> contents, std::span<const std::byte> aad, bool ignore)
+{
+    std::vector<std::byte> packet(contents.size() + BIP324Cipher::EXPANSION);
+    cipher.Encrypt(contents, aad, ignore, packet);
+    return packet;
+}
+
+/** Receive one packet the way V2Transport does, length first, and check what comes out. */
+void CheckDecryptPacket(BIP324Cipher& cipher, std::span<const std::byte> packet, std::span<const std::byte> aad, bool ignore, std::span<const std::byte> contents)
+{
+    BOOST_REQUIRE_GE(packet.size(), BIP324Cipher::EXPANSION);
+    const uint32_t len{cipher.DecryptLength(packet.first(BIP324Cipher::LENGTH_LEN))};
+    BOOST_REQUIRE_EQUAL(len, contents.size());
+    BOOST_REQUIRE_EQUAL(packet.size(), len + BIP324Cipher::EXPANSION);
+    std::vector<std::byte> decrypted(len);
+    bool dec_ignore{!ignore};
+    BOOST_CHECK(cipher.Decrypt(packet.subspan(BIP324Cipher::LENGTH_LEN), aad, dec_ignore, decrypted));
+    BOOST_CHECK_EQUAL(dec_ignore, ignore);
+    BOOST_CHECK(std::ranges::equal(decrypted, contents));
+}
+
+/** Whether a packet authenticates under the receiver's current keys (its length is decrypted but not trusted). */
+bool Authenticates(BIP324Cipher& cipher, std::span<const std::byte> packet)
+{
+    cipher.DecryptLength(packet.first(BIP324Cipher::LENGTH_LEN));
+    std::vector<std::byte> decrypted(packet.size() - BIP324Cipher::EXPANSION);
+    bool ignore{false};
+    return cipher.Decrypt(packet.subspan(BIP324Cipher::LENGTH_LEN), {}, ignore, decrypted);
+}
+
+/** One output of the BIP324 (stage-1) HKDF, as src/bip324.cpp derives it, for the selected network. */
+std::array<std::byte, 32> Stage1Output(std::span<const std::byte> ecdh_secret, const std::string& label)
+{
+    const auto& magic{Params().MessageStart()};
+    const std::string salt{std::string{"bitcoin_v2_shared_secret"} + std::string(magic.begin(), magic.end())};
+    CHKDF_HMAC_SHA256_L32 hkdf(UCharCast(ecdh_secret.data()), ecdh_secret.size(), salt);
+    std::array<std::byte, 32> out;
+    hkdf.Expand32(label, UCharCast(out.data()));
+    return out;
+}
+
+const std::array<std::string, 4> STAGE1_KEY_LABELS{"initiator_L", "initiator_P", "responder_L", "responder_P"};
+const std::array<std::string, 5> STAGE2_LABELS{"xcoin_hx1_initiator_L", "xcoin_hx1_initiator_P", "xcoin_hx1_responder_L", "xcoin_hx1_responder_P", "xcoin_hx1_session_id"};
+
+std::array<std::span<const std::byte>, 5> Stage2Outputs(const BIP324Cipher::Stage2Keys& keys)
+{
+    return {keys.initiator_L, keys.initiator_P, keys.responder_L, keys.responder_P, keys.session_id};
+}
+
+/** XIP-4's stage-2 key schedule written out from its text with HMAC-SHA256, without DeriveStage2Keys(). */
+void CheckStage2ScheduleText(const UniValue& expected, std::span<const std::byte> kem_secret, std::span<const std::byte> ecdh_secret,
+                             std::span<const std::byte> ct, const EllSwiftPubKey& ell_initiator, std::span<const std::byte> ek,
+                             const EllSwiftPubKey& ell_responder)
+{
+    std::vector<unsigned char> ikm2;
+    for (const auto part : {kem_secret, ecdh_secret, ct, PubKeySpan(ell_initiator), ek, PubKeySpan(ell_responder)}) {
+        ikm2.insert(ikm2.end(), UCharCast(part.data()), UCharCast(part.data()) + part.size());
+    }
+    BOOST_CHECK_EQUAL(ikm2.size(), expected["ikm2_len"].getInt<size_t>());
+    BOOST_CHECK_EQUAL(Sha256Hex(MakeByteSpan(ikm2)), expected["ikm2_sha256"].get_str());
+
+    const auto& magic{Params().MessageStart()};
+    const std::string salt2{std::string{"xcoin_v2_hybrid_mlkem768"} + std::string(magic.begin(), magic.end())};
+    BOOST_CHECK_EQUAL(salt2.size(), 28U);
+    std::array<unsigned char, CHMAC_SHA256::OUTPUT_SIZE> prk2;
+    CHMAC_SHA256(UCharCast(salt2.data()), salt2.size()).Write(ikm2.data(), ikm2.size()).Finalize(prk2.data());
+    BOOST_CHECK_EQUAL(HexStr(prk2), expected["prk2"].get_str());
+    for (const std::string& label : STAGE2_LABELS) {
+        const unsigned char one{0x01};
+        std::array<unsigned char, CHMAC_SHA256::OUTPUT_SIZE> okm;
+        CHMAC_SHA256(prk2.data(), prk2.size()).Write(UCharCast(label.data()), label.size()).Write(&one, 1).Finalize(okm.data());
+        BOOST_CHECK_EQUAL(HexStr(okm), expected[label].get_str());
+    }
+}
+
+/** Send one side's handshake (ElligatorSwift key, garbage, garbage terminator, decoys, version packet) and
+ *  compare it with the vector; the other side decrypts every packet. */
+void CheckHandshakeFlight(BIP324Cipher& sender, BIP324Cipher& receiver, std::span<const std::byte> garbage,
+                          const UniValue& decoys, std::span<const std::byte> version_contents,
+                          const UniValue& expected_version_packet, const UniValue& expected_handshake)
+{
+    const EllSwiftPubKey& ellswift{sender.GetOurPubKey()};
+    std::vector<std::byte> flight(ellswift.begin(), ellswift.end());
+    flight.insert(flight.end(), garbage.begin(), garbage.end());
+    const auto terminator{sender.GetSendGarbageTerminator()};
+    flight.insert(flight.end(), terminator.begin(), terminator.end());
+    std::span<const std::byte> aad{garbage};
+    for (const UniValue& decoy : decoys.getValues()) {
+        const auto contents{HexBytes(decoy)};
+        const auto packet{EncryptPacket(sender, contents, aad, /*ignore=*/true)};
+        CheckDecryptPacket(receiver, packet, aad, /*ignore=*/true, contents);
+        flight.insert(flight.end(), packet.begin(), packet.end());
+        aad = {};
+    }
+    const auto version_packet{EncryptPacket(sender, version_contents, aad, /*ignore=*/false)};
+    CheckDecryptPacket(receiver, version_packet, aad, /*ignore=*/false, version_contents);
+    flight.insert(flight.end(), version_packet.begin(), version_packet.end());
+
+    BOOST_CHECK_EQUAL(expected_version_packet["stage1_index"].getInt<size_t>(), decoys.size());
+    BOOST_CHECK_EQUAL(version_contents.size(), expected_version_packet["contents_len"].getInt<size_t>());
+    BOOST_CHECK_EQUAL(Sha256Hex(version_contents), expected_version_packet["contents_sha256"].get_str());
+    BOOST_CHECK_EQUAL(version_packet.size(), expected_version_packet["wire_len"].getInt<size_t>());
+    BOOST_CHECK_EQUAL(Sha256Hex(version_packet), expected_version_packet["wire_sha256"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(version_packet), expected_version_packet["wire"].get_str());
+    BOOST_CHECK_EQUAL(flight.size(), expected_handshake["len"].getInt<size_t>());
+    BOOST_CHECK_EQUAL(Sha256Hex(flight), expected_handshake["sha256"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(flight), expected_handshake["bytes"].get_str());
+}
+
+/** Send what follows the version packet in one direction (decoys, then the application packets) and compare
+ *  it with the vector: every pinned packet, and the length and hash of the whole stream. first_index is the
+ *  sender's packet index, in its current stage, of the first of them. */
+void CheckPacketsAfterVersion(BIP324Cipher& sender, BIP324Cipher& receiver, bool from_initiator,
+                              const std::vector<std::vector<std::byte>>& decoys, uint32_t first_index,
+                              const UniValue& expected)
+{
+    std::map<uint32_t, const UniValue*> pinned;
+    for (const UniValue& entry : expected["entries"].getValues()) {
+        pinned.emplace(entry["stage_index"].getInt<uint32_t>(), &entry);
+    }
+    const uint32_t count{expected["count"].getInt<uint32_t>()};
+    BOOST_REQUIRE_GE(count, decoys.size());
+
+    std::vector<std::byte> stream;
+    uint32_t index{first_index};
+    size_t matched{0};
+    const auto send{[&](std::span<const std::byte> contents, bool decoy, uint32_t app_index) {
+        const auto packet{EncryptPacket(sender, contents, {}, decoy)};
+        CheckDecryptPacket(receiver, packet, {}, decoy, contents);
+        if (const auto it{pinned.find(index)}; it != pinned.end()) {
+            const UniValue& entry{*it->second};
+            BOOST_CHECK_EQUAL(HexStr(packet), entry["wire"].get_str());
+            BOOST_CHECK_EQUAL(HexStr(contents), entry["contents"].get_str());
+            BOOST_CHECK_EQUAL(entry.exists("decoy") && entry["decoy"].get_bool(), decoy);
+            if (!decoy) BOOST_CHECK_EQUAL(entry["app_index"].getInt<uint32_t>(), app_index);
+            ++matched;
+        }
+        stream.insert(stream.end(), packet.begin(), packet.end());
+        ++index;
+    }};
+    for (const auto& decoy : decoys) {
+        send(decoy, /*decoy=*/true, 0);
+    }
+    for (uint32_t i = 0; i < count - decoys.size(); ++i) {
+        send(AppContents(from_initiator, i), /*decoy=*/false, i);
+    }
+
+    BOOST_CHECK_EQUAL(matched, pinned.size());
+    BOOST_CHECK_EQUAL(stream.size(), expected["all_len"].getInt<size_t>());
+    BOOST_CHECK_EQUAL(Sha256Hex(stream), expected["all_sha256"].get_str());
+}
+
+void SelectVectorParams(const UniValue& handshake)
+{
+    const std::map<std::string, ChainType> chains{{"mainnet", ChainType::MAIN}, {"testnet", ChainType::TESTNET}, {"regtest", ChainType::REGTEST}};
+    const auto chain{chains.find(handshake["network"].get_str())};
+    BOOST_REQUIRE(chain != chains.end());
+    SelectParams(chain->second);
+    BOOST_REQUIRE_EQUAL(HexStr(Params().MessageStart()), handshake["magic"].get_str());
+}
+
+V2HybridMode VectorMode(const UniValue& mode)
+{
+    BOOST_REQUIRE(mode.getInt<int>() >= 0 && mode.getInt<int>() <= 2);
+    return static_cast<V2HybridMode>(mode.getInt<int>());
+}
+
+CKey VectorKey(const UniValue& hex)
+{
+    const auto priv{ParseHex(hex.get_str())};
+    CKey key;
+    key.Set(priv.begin(), priv.end(), true);
+    BOOST_REQUIRE(key.IsValid());
+    return key;
+}
+
+/** Run one handshake of src/test/data/hx1_handshake_vectors.json through a pair of ciphers. */
+void CheckHX1HandshakeVector(const UniValue& inputs, const UniValue& handshake)
+{
+    BOOST_TEST_INFO_SCOPE("handshake vector " << handshake["name"].get_str());
+    SelectVectorParams(handshake);
+    const V2HybridMode initiator_mode{VectorMode(handshake["initiator_mode"])};
+    const V2HybridMode responder_mode{VectorMode(handshake["responder_mode"])};
+    const bool hybrid{handshake.exists("stage2")};
+
+    const CKey key_initiator{VectorKey(inputs["priv_initiator"])};
+    const CKey key_responder{VectorKey(inputs["priv_responder"])};
+    BIP324Cipher initiator(key_initiator, HexBytes(inputs["aux_initiator"]));
+    BIP324Cipher responder(key_responder, HexBytes(inputs["aux_responder"]));
+    const EllSwiftPubKey ell_initiator{initiator.GetOurPubKey()};
+    const EllSwiftPubKey ell_responder{responder.GetOurPubKey()};
+    BOOST_CHECK_EQUAL(HexStr(PubKeySpan(ell_initiator)), handshake["ell_initiator"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(PubKeySpan(ell_responder)), handshake["ell_responder"].get_str());
+    const ECDHSecret ecdh_secret{key_initiator.ComputeBIP324ECDHSecret(ell_responder, ell_initiator, /*initiating=*/true)};
+    BOOST_CHECK_EQUAL(HexStr(ecdh_secret), handshake["ecdh_secret"].get_str());
+    BOOST_CHECK(key_responder.ComputeBIP324ECDHSecret(ell_initiator, ell_responder, /*initiating=*/false) == ecdh_secret);
+
+    initiator.Initialize(ell_responder, /*initiator=*/true, /*self_decrypt=*/false, initiator_mode);
+    responder.Initialize(ell_initiator, /*initiator=*/false, /*self_decrypt=*/false, responder_mode);
+    BOOST_CHECK_EQUAL(initiator.HasStage2Secret(), initiator_mode != V2HybridMode::OFF);
+    BOOST_CHECK_EQUAL(responder.HasStage2Secret(), responder_mode != V2HybridMode::OFF);
+
+    // Stage 1 is BIP324, whatever the mode.
+    const UniValue& stage1{handshake["stage1"]};
+    for (size_t i = 0; i < STAGE1_KEY_LABELS.size(); ++i) {
+        BOOST_CHECK_EQUAL(HexStr(Stage1Output(ecdh_secret, STAGE1_KEY_LABELS[i])), stage1[STAGE1_KEY_LABELS[i]].get_str());
+    }
+    BOOST_CHECK_EQUAL(HexStr(initiator.GetSessionID()), stage1["session_id"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(responder.GetSessionID()), stage1["session_id"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(initiator.GetSendGarbageTerminator()), stage1["garbage_terminator_initiator"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(initiator.GetReceiveGarbageTerminator()), stage1["garbage_terminator_responder"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(responder.GetSendGarbageTerminator()), stage1["garbage_terminator_responder"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(responder.GetReceiveGarbageTerminator()), stage1["garbage_terminator_initiator"].get_str());
+
+    std::vector<std::byte> ek, ct, kem_secret;
+    if (hybrid) {
+        const UniValue& mlkem{handshake["mlkem"]};
+        ek = HexBytes(mlkem["ek"]);
+        ct = HexBytes(mlkem["ct"]);
+        kem_secret = HexBytes(mlkem["shared_secret"]);
+        BOOST_REQUIRE_EQUAL(ek.size(), BIP324Cipher::HX1_EK_LEN);
+        BOOST_REQUIRE_EQUAL(ct.size(), BIP324Cipher::HX1_CT_LEN);
+        BOOST_REQUIRE_EQUAL(kem_secret.size(), BIP324Cipher::HX1_SHARED_SECRET_LEN);
+        BOOST_CHECK_EQUAL(Sha256Hex(ek), mlkem["ek_sha256"].get_str());
+        BOOST_CHECK_EQUAL(Sha256Hex(ct), mlkem["ct_sha256"].get_str());
+    }
+
+    // VP_R carries the OFFER (mode 1 or 2 responder), VP_I the ACCEPT (hybrid only); both use stage-1 keys.
+    const auto responder_version{responder_mode != V2HybridMode::OFF ? HX1Record(HX1_KIND_OFFER, ek) : std::vector<std::byte>{}};
+    const auto initiator_version{hybrid ? HX1Record(HX1_KIND_ACCEPT, ct) : std::vector<std::byte>{}};
+    CheckHandshakeFlight(responder, initiator, HexBytes(inputs["garbage_responder"]), handshake["responder_decoys_before_version"],
+                         responder_version, handshake["responder_version_packet"], handshake["responder_handshake"]);
+    CheckHandshakeFlight(initiator, responder, HexBytes(inputs["garbage_initiator"]), handshake["initiator_decoys_before_version"],
+                         initiator_version, handshake["initiator_version_packet"], handshake["initiator_handshake"]);
+
+    if (hybrid) {
+        const UniValue& stage2{handshake["stage2"]};
+        CheckStage2ScheduleText(stage2, kem_secret, ecdh_secret, ct, ell_initiator, ek, ell_responder);
+        BIP324Cipher::Stage2Keys keys;
+        BIP324Cipher::DeriveStage2Keys(Params().MessageStart(), kem_secret, ecdh_secret, ct, ell_initiator, ek, ell_responder, keys);
+        const auto outputs{Stage2Outputs(keys)};
+        for (size_t i = 0; i < STAGE2_LABELS.size(); ++i) {
+            BOOST_CHECK_EQUAL(HexStr(outputs[i]), stage2[STAGE2_LABELS[i]].get_str());
+        }
+
+        // The initiator switches right after encrypting VP_I, the responder right after decrypting it.
+        BOOST_CHECK(initiator.SwitchToStage2(kem_secret, ct, ek));
+        BOOST_CHECK(responder.SwitchToStage2(kem_secret, ct, ek));
+        for (BIP324Cipher* cipher : {&initiator, &responder}) {
+            BOOST_CHECK(cipher->IsStage2());
+            BOOST_CHECK(!cipher->HasStage2Secret());
+            BOOST_CHECK(!cipher->SwitchToStage2(kem_secret, ct, ek));
+            BOOST_CHECK_EQUAL(HexStr(cipher->GetSessionID()), stage2["xcoin_hx1_session_id"].get_str());
+        }
+    } else {
+        // The classical decision: whichever side kept the ECDH secret drops it, and both stay on stage 1.
+        initiator.DiscardStage2Secret();
+        responder.DiscardStage2Secret();
+        for (BIP324Cipher* cipher : {&initiator, &responder}) {
+            BOOST_CHECK(!cipher->IsStage2());
+            BOOST_CHECK(!cipher->HasStage2Secret());
+            BOOST_CHECK_EQUAL(HexStr(cipher->GetSessionID()), stage1["session_id"].get_str());
+        }
+    }
+
+    // In a hybrid session the responder's stage-2 stream starts with the confirmation packet, a decoy with
+    // empty contents; the initiator may send decoys of its own first. Stage 1 continues after the version packet.
+    std::vector<std::vector<std::byte>> initiator_decoys, responder_decoys;
+    if (hybrid) {
+        for (const UniValue& decoy : handshake["initiator_decoys_after_switch"].getValues()) {
+            initiator_decoys.push_back(HexBytes(decoy));
+        }
+        responder_decoys.emplace_back();
+    }
+    const UniValue& after{handshake["packets_after_version"]};
+    for (const char* direction : {"initiator_to_responder", "responder_to_initiator"}) {
+        BOOST_CHECK_EQUAL(after[direction]["stage"].getInt<int>(), hybrid ? 2 : 1);
+    }
+    const uint32_t initiator_first{hybrid ? 0 : uint32_t(handshake["initiator_decoys_before_version"].size() + 1)};
+    const uint32_t responder_first{hybrid ? 0 : uint32_t(handshake["responder_decoys_before_version"].size() + 1)};
+    CheckPacketsAfterVersion(initiator, responder, /*from_initiator=*/true, initiator_decoys, initiator_first, after["initiator_to_responder"]);
+    CheckPacketsAfterVersion(responder, initiator, /*from_initiator=*/false, responder_decoys, responder_first, after["responder_to_initiator"]);
+
+    // What getpeerinfo reports once the other side's first stage-2 packet (or, classical, its version packet) has authenticated.
+    const UniValue& reported{handshake["reported"]};
+    BOOST_CHECK_EQUAL(HexStr(initiator.GetSessionID()), reported["initiator"]["session_id"].get_str());
+    BOOST_CHECK_EQUAL(HexStr(responder.GetSessionID()), reported["responder"]["session_id"].get_str());
+    BOOST_CHECK_EQUAL(initiator.IsStage2(), reported["initiator"]["transport_hybrid"].get_bool());
+    BOOST_CHECK_EQUAL(responder.IsStage2(), reported["responder"]["transport_hybrid"].get_bool());
+}
+
+/** Stage-1 and stage-2 keys for the same connection: the eight packet keys are pairwise different, and so are
+ *  the two session ids. */
+void CheckStageKeysDistinct(std::span<const std::byte> kem_secret, std::span<const std::byte> ecdh_secret,
+                            std::span<const std::byte> ct, const EllSwiftPubKey& ell_initiator,
+                            std::span<const std::byte> ek, const EllSwiftPubKey& ell_responder)
+{
+    BIP324Cipher::Stage2Keys stage2;
+    BIP324Cipher::DeriveStage2Keys(Params().MessageStart(), kem_secret, ecdh_secret, ct, ell_initiator, ek, ell_responder, stage2);
+    std::set<std::string> keys;
+    for (const std::string& label : STAGE1_KEY_LABELS) {
+        keys.insert(HexStr(Stage1Output(ecdh_secret, label)));
+    }
+    BOOST_CHECK_EQUAL(keys.size(), 4U);
+    for (const auto key : {std::span<const std::byte>{stage2.initiator_L}, std::span<const std::byte>{stage2.initiator_P},
+                           std::span<const std::byte>{stage2.responder_L}, std::span<const std::byte>{stage2.responder_P}}) {
+        keys.insert(HexStr(key));
+    }
+    BOOST_CHECK_EQUAL(keys.size(), 8U);
+    const std::string stage1_session_id{HexStr(Stage1Output(ecdh_secret, "session_id"))};
+    BOOST_CHECK(HexStr(stage2.session_id) != stage1_session_id);
+    BOOST_CHECK(!keys.contains(HexStr(stage2.session_id)));
+    BOOST_CHECK(!keys.contains(stage1_session_id));
+}
 
 }  // namespace
 
@@ -304,6 +674,194 @@ BOOST_AUTO_TEST_CASE(packet_test_vectors) {
         "69c6afbcea2ea172d621413ac1bd6b4c85277cd805adf1ef18a761a9f0c9a901",
         "",
         "828c423a832e5daeaf6a9fa0db17b933321a7ca0fba894b0a71c0a6b67b689a37ace89937858340572df61b8e7e36c9805434bac9833a0f9d40c4890020cd20434f78f162cc4854eef645edb0c028e3c4e2a99f8a17c32e1345d0ba3434c13a6d54fc7121c7eb0dd75b80828932791e117abbb165c11e11b57a3fb4afe7ffe78");
+}
+
+BOOST_AUTO_TEST_CASE(hx1_handshake_vectors)
+{
+    // XIP-4's pinned HX1 handshakes (src/test/data/hx1_handshake_vectors.json, from
+    // contrib/testgen/gen_hx1_handshake_vectors.py) through pairs of ciphers: stage-1 and stage-2 keys, both
+    // session ids, the version packets and 226 application packets each way after them, on mainnet, testnet A
+    // and regtest, with and without decoys, and a prefer-mode initiator meeting a classical responder.
+    UniValue vectors;
+    BOOST_REQUIRE(vectors.read(json_tests::hx1_handshake_vectors)); // an object, so not read_json (which wants an array)
+    BOOST_REQUIRE(vectors.isObject());
+    const UniValue& handshakes{vectors["handshakes"]};
+    BOOST_REQUIRE_EQUAL(handshakes.size(), 5U);
+    std::set<std::string> hybrid_networks;
+    for (const UniValue& handshake : handshakes.getValues()) {
+        CheckHX1HandshakeVector(vectors["inputs"], handshake);
+        if (handshake.exists("stage2")) hybrid_networks.insert(handshake["network"].get_str());
+    }
+    BOOST_CHECK((hybrid_networks == std::set<std::string>{"mainnet", "testnet", "regtest"}));
+}
+
+BOOST_AUTO_TEST_CASE(hx1_stage2_keys_distinct)
+{
+    // Both stages start their counters at 0, so they never reuse a key and nonce pair only because the eight
+    // packet keys, four per stage, are pairwise different (XIP-4, "Stage-2 key schedule").
+    UniValue vectors;
+    BOOST_REQUIRE(vectors.read(json_tests::hx1_handshake_vectors));
+    std::set<std::string> initiator_keys;
+    for (const UniValue& handshake : vectors["handshakes"].getValues()) {
+        if (!handshake.exists("stage2")) continue;
+        SelectVectorParams(handshake);
+        const UniValue& mlkem{handshake["mlkem"]};
+        const EllSwiftPubKey ell_initiator{HexBytes(handshake["ell_initiator"])};
+        const EllSwiftPubKey ell_responder{HexBytes(handshake["ell_responder"])};
+        CheckStageKeysDistinct(HexBytes(mlkem["shared_secret"]), HexBytes(handshake["ecdh_secret"]), HexBytes(mlkem["ct"]),
+                               ell_initiator, HexBytes(mlkem["ek"]), ell_responder);
+        initiator_keys.insert(handshake["stage2"]["xcoin_hx1_initiator_L"].get_str());
+    }
+    // Every vector has the same ML-KEM and ECDH inputs; only MessageStart, in the salt, tells the networks apart.
+    BOOST_CHECK_EQUAL(initiator_keys.size(), 3U);
+
+    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::REGTEST}) {
+        SelectParams(chain);
+        for (int i = 0; i < 8; ++i) {
+            const CKey key_initiator{GenerateRandomKey()};
+            const CKey key_responder{GenerateRandomKey()};
+            const EllSwiftPubKey ell_initiator{key_initiator.EllSwiftCreate(m_rng.randbytes<std::byte>(32))};
+            const EllSwiftPubKey ell_responder{key_responder.EllSwiftCreate(m_rng.randbytes<std::byte>(32))};
+            const ECDHSecret ecdh_secret{key_initiator.ComputeBIP324ECDHSecret(ell_responder, ell_initiator, /*initiating=*/true)};
+            CheckStageKeysDistinct(m_rng.randbytes<std::byte>(BIP324Cipher::HX1_SHARED_SECRET_LEN), ecdh_secret,
+                                   m_rng.randbytes<std::byte>(BIP324Cipher::HX1_CT_LEN), ell_initiator,
+                                   m_rng.randbytes<std::byte>(BIP324Cipher::HX1_EK_LEN), ell_responder);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(hx1_stage2_ciphers)
+{
+    // After SwitchToStage2() both directions start again at packet 0 under new keys: the same contents encrypt
+    // differently in each direction and in each stage, and a stage-2 packet does not authenticate under the
+    // stage-1 keys, with the stage-1 counters restarted or continued.
+    UniValue vectors;
+    BOOST_REQUIRE(vectors.read(json_tests::hx1_handshake_vectors));
+    const UniValue& inputs{vectors["inputs"]};
+    const UniValue& v1{vectors["handshakes"][0]};
+    SelectVectorParams(v1);
+    const auto ek{HexBytes(v1["mlkem"]["ek"])};
+    const auto ct{HexBytes(v1["mlkem"]["ct"])};
+    const auto kem_secret{HexBytes(v1["mlkem"]["shared_secret"])};
+    const CKey key_initiator{VectorKey(inputs["priv_initiator"])};
+    const CKey key_responder{VectorKey(inputs["priv_responder"])};
+    const auto aux_initiator{HexBytes(inputs["aux_initiator"])};
+    const auto aux_responder{HexBytes(inputs["aux_responder"])};
+
+    BIP324Cipher initiator(key_initiator, aux_initiator);
+    BIP324Cipher responder(key_responder, aux_responder);
+    const EllSwiftPubKey ell_initiator{initiator.GetOurPubKey()};
+    const EllSwiftPubKey ell_responder{responder.GetOurPubKey()};
+    initiator.Initialize(ell_responder, /*initiator=*/true, /*self_decrypt=*/false, V2HybridMode::PREFER);
+    responder.Initialize(ell_initiator, /*initiator=*/false, /*self_decrypt=*/false, V2HybridMode::REQUIRE);
+    BOOST_REQUIRE(initiator.SwitchToStage2(kem_secret, ct, ek));
+    BOOST_REQUIRE(responder.SwitchToStage2(kem_secret, ct, ek));
+    BIP324Cipher stage1_initiator(key_initiator, aux_initiator);
+    BIP324Cipher stage1_responder(key_responder, aux_responder);
+    stage1_initiator.Initialize(ell_responder, /*initiator=*/true);
+    stage1_responder.Initialize(ell_initiator, /*initiator=*/false);
+
+    const auto contents{m_rng.randbytes<std::byte>(100)};
+    const auto stage1_to_responder{EncryptPacket(stage1_initiator, contents, {}, /*ignore=*/false)};
+    const auto stage1_to_initiator{EncryptPacket(stage1_responder, contents, {}, /*ignore=*/false)};
+    const auto stage2_to_responder{EncryptPacket(initiator, contents, {}, /*ignore=*/false)};
+    const auto stage2_to_initiator{EncryptPacket(responder, contents, {}, /*ignore=*/false)};
+    const std::set<std::vector<std::byte>> packets{stage1_to_responder, stage1_to_initiator, stage2_to_responder, stage2_to_initiator};
+    BOOST_CHECK_EQUAL(packets.size(), 4U);
+
+    CheckDecryptPacket(responder, stage2_to_responder, {}, /*ignore=*/false, contents);
+    CheckDecryptPacket(initiator, stage2_to_initiator, {}, /*ignore=*/false, contents);
+
+    for (const bool to_responder : {true, false}) {
+        const CKey& key{to_responder ? key_responder : key_initiator};
+        const auto& aux{to_responder ? aux_responder : aux_initiator};
+        const EllSwiftPubKey& their_pubkey{to_responder ? ell_initiator : ell_responder};
+        const auto& stage2_packet{to_responder ? stage2_to_responder : stage2_to_initiator};
+        BIP324Cipher restarted(key, aux);
+        restarted.Initialize(their_pubkey, /*initiator=*/!to_responder);
+        BOOST_CHECK(!Authenticates(restarted, stage2_packet));
+        BIP324Cipher continued(key, aux);
+        continued.Initialize(their_pubkey, /*initiator=*/!to_responder);
+        BOOST_CHECK(Authenticates(continued, to_responder ? stage1_to_responder : stage1_to_initiator));
+        BOOST_CHECK(!Authenticates(continued, stage2_packet));
+    }
+
+    // self_decrypt swaps the stage-2 ciphers the way it swaps the stage-1 ones.
+    BIP324Cipher self_decrypt(key_initiator, aux_initiator);
+    self_decrypt.Initialize(ell_responder, /*initiator=*/true, /*self_decrypt=*/true, V2HybridMode::PREFER);
+    BOOST_REQUIRE(self_decrypt.SwitchToStage2(kem_secret, ct, ek));
+    CheckDecryptPacket(self_decrypt, stage2_to_responder, {}, /*ignore=*/false, contents);
+}
+
+BOOST_AUTO_TEST_CASE(hx1_mode_off_keeps_nothing)
+{
+    // The XIP-4 kill switch at the cipher: with V2HybridMode::OFF, the default, Initialize() wipes the ECDH secret
+    // where BIP324 always has and allocates no HX1 state, and SwitchToStage2() refuses. Stage 1 is the same in
+    // every mode. A secret that is kept lives in the locked pool and leaves it on discard or destruction.
+    UniValue vectors;
+    BOOST_REQUIRE(vectors.read(json_tests::hx1_handshake_vectors));
+    const UniValue& inputs{vectors["inputs"]};
+    const UniValue& v1{vectors["handshakes"][0]};
+    SelectVectorParams(v1);
+    const auto ek{HexBytes(v1["mlkem"]["ek"])};
+    const auto ct{HexBytes(v1["mlkem"]["ct"])};
+    const auto kem_secret{HexBytes(v1["mlkem"]["shared_secret"])};
+    const CKey key_initiator{VectorKey(inputs["priv_initiator"])};
+    const auto aux_initiator{HexBytes(inputs["aux_initiator"])};
+    const auto garbage_initiator{HexBytes(inputs["garbage_initiator"])};
+    const EllSwiftPubKey ell_responder{HexBytes(v1["ell_responder"])};
+
+    LockedPoolManager& pool{LockedPoolManager::Instance()};
+    size_t key_alloc;
+    {
+        const size_t before{pool.stats().used};
+        const CKey copy{key_initiator};
+        key_alloc = pool.stats().used - before;
+    }
+    BOOST_REQUIRE_GT(key_alloc, 0U);
+
+    const auto contents{m_rng.randbytes<std::byte>(50)};
+    std::optional<std::vector<std::byte>> first_packet;
+    for (const std::optional<V2HybridMode> mode : {std::optional<V2HybridMode>{}, std::optional{V2HybridMode::OFF},
+                                                   std::optional{V2HybridMode::PREFER}, std::optional{V2HybridMode::REQUIRE}}) {
+        BIP324Cipher cipher(key_initiator, aux_initiator);
+        const size_t before{pool.stats().used};
+        if (mode) {
+            cipher.Initialize(ell_responder, /*initiator=*/true, /*self_decrypt=*/false, *mode);
+        } else {
+            cipher.Initialize(ell_responder, /*initiator=*/true);
+        }
+        if (!mode || *mode == V2HybridMode::OFF) {
+            BOOST_CHECK(!cipher.HasStage2Secret());
+            BOOST_CHECK_EQUAL(pool.stats().used + key_alloc, before);
+            BOOST_CHECK(!cipher.SwitchToStage2(kem_secret, ct, ek));
+        } else {
+            BOOST_CHECK(cipher.HasStage2Secret());
+            BOOST_CHECK_GT(pool.stats().used + key_alloc, before);
+            BOOST_CHECK(!cipher.SwitchToStage2(std::span{kem_secret}.first(BIP324Cipher::HX1_SHARED_SECRET_LEN - 1), ct, ek));
+            BOOST_CHECK(!cipher.SwitchToStage2(kem_secret, std::span{ct}.first(BIP324Cipher::HX1_CT_LEN - 1), ek));
+            BOOST_CHECK(!cipher.SwitchToStage2(kem_secret, ct, std::span{ek}.first(BIP324Cipher::HX1_EK_LEN - 1)));
+            BOOST_CHECK(cipher.HasStage2Secret());
+            cipher.DiscardStage2Secret();
+            BOOST_CHECK(!cipher.HasStage2Secret());
+            BOOST_CHECK_EQUAL(pool.stats().used + key_alloc, before);
+            BOOST_CHECK(!cipher.SwitchToStage2(kem_secret, ct, ek));
+        }
+        BOOST_CHECK(!cipher.IsStage2());
+        BOOST_CHECK_EQUAL(HexStr(cipher.GetSessionID()), v1["stage1"]["session_id"].get_str());
+        const auto packet{EncryptPacket(cipher, contents, garbage_initiator, /*ignore=*/false)};
+        if (!first_packet) first_packet = packet;
+        BOOST_CHECK(packet == *first_packet);
+    }
+
+    const size_t before{pool.stats().used};
+    {
+        BIP324Cipher cipher(key_initiator, aux_initiator);
+        cipher.Initialize(ell_responder, /*initiator=*/true, /*self_decrypt=*/false, V2HybridMode::PREFER);
+        BOOST_CHECK(cipher.HasStage2Secret());
+        BOOST_CHECK_GT(pool.stats().used, before);
+    }
+    BOOST_CHECK_EQUAL(pool.stats().used, before);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

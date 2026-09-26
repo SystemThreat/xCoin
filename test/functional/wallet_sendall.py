@@ -459,9 +459,9 @@ class SendallTest(BitcoinTestFramework):
         self.log.info("Test that sendall fails if resulting transaction is too large")
 
         # Force the wallet to bulk-generate the addresses we'll need
-        # xCoin: 100 inputs of 0.001 XCF, not upstream's 1,600 of 0.000025. A
+        # xCoin: 100 inputs of 0.001 XID, not upstream's 1,600 of 0.000025. A
         # post-quantum input carries ~5.4 kB of witness, so some 70 of them already
-        # exceed the 400,000 WU standard transaction weight (and 0.000025 XCF would
+        # exceed the 400,000 WU standard transaction weight (and 0.000025 XID would
         # not even pay for spending one: sendall skips such uneconomic inputs), and
         # every witness v3 address costs an ML-DSA-65 and an SLH-DSA key generation
         # (~60 ms per chain): a 1,600-key refill would run past the 30 s RPC timeout.

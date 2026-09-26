@@ -25,7 +25,7 @@ class CTransaction;
  * (byte for byte, so the digest can be recomputed by the unit suite and the
  * currency id by the node). The v2 genesis coinbase commits to it:
  *
- *   scriptSig message : "Hic experimentum prosperat - <date> - 2,100,000,000,000,000 sats, 21M XCF"
+ *   scriptSig message : "Hic experimentum prosperat - <date> - 10,000,000,000,000,000 sats, 100M XID"
  *   output            : OP_RETURN <"XCOIN/charter/1" || CHARTER_HASH>   (47 bytes)
  *
  * and CURRENCY_ID = SHA-256(v2 genesis header (80 bytes) || charter text).
@@ -84,9 +84,9 @@ bool HasCommitment(const CTransaction& tx);
 constexpr size_t GENESIS_MESSAGE_HASH_CHARS{16};
 
 /** The genesis coinbase message for a date written as YYYY-MM-DD:
- *  "Hic experimentum prosperat - <date> - 2,100,000,000,000,000 sats, 21M XCF"
- *  (77 characters; the scriptSig built by CreateGenesisBlock is then 86 bytes:
- *  04ffff001d (5) + 0104 (2) + OP_PUSHDATA1 77 <message> (79), under the 100-byte
+ *  "Hic experimentum prosperat - <date> - 10,000,000,000,000,000 sats, 100M XID"
+ *  (79 characters; the scriptSig built by CreateGenesisBlock is then 88 bytes:
+ *  04ffff001d (5) + 0104 (2) + OP_PUSHDATA1 79 <message> (81), under the 100-byte
  *  bad-cb-length cap). */
 std::string GenesisMessage(std::string_view date);
 

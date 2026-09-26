@@ -499,9 +499,9 @@ void PayCoinbase(CBlock& block, CAmount value, ChainstateManager& chainman)
 
 // ConnectBlock: the coinbase may pay at most subsidy + fees (bad-cb-amount). One
 // satoshi over is refused at height 101, at the first era boundary (regtest 151,
-// where the subsidy halves to 25 XCF and the old 50 XCF rate is over-payment),
+// where the subsidy halves to 25 XID and the old 50 XID rate is over-payment),
 // and the exact amount is accepted. After EMISSION_END_HEIGHT the limit is the
-// fees alone: that height (3,358,350 on regtest) cannot be mined here, so the
+// fees alone: that height (15,998,350 on regtest) cannot be mined here, so the
 // subsidy side of it is checked on GetBlockSubsidy directly.
 BOOST_AUTO_TEST_CASE(bad_cb_amount)
 {
@@ -538,7 +538,7 @@ BOOST_AUTO_TEST_CASE(bad_cb_amount)
         BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveHeight()), 101);
     }
 
-    // The first regtest era boundary: block 151 pays 25 XCF.
+    // The first regtest era boundary: block 151 pays 25 XID.
     mineBlocks(49);
     BOOST_REQUIRE_EQUAL(WITH_LOCK(cs_main, return m_node.chainman->ActiveHeight()), 150);
     BOOST_REQUIRE_EQUAL(GetBlockSubsidy(150, consensus), 50 * COIN);
@@ -559,7 +559,7 @@ BOOST_AUTO_TEST_CASE(bad_cb_amount)
     }
 
     // Past the end of emission the coinbase limit is the fees: no subsidy at all.
-    BOOST_CHECK_EQUAL(consensus.EmissionEndHeight(), 3358350);
+    BOOST_CHECK_EQUAL(consensus.EmissionEndHeight(), 15998350);
     BOOST_CHECK_GT(GetBlockSubsidy(consensus.EmissionEndHeight(), consensus), 0);
     BOOST_CHECK_EQUAL(GetBlockSubsidy(consensus.EmissionEndHeight() + 1, consensus), 0);
 }

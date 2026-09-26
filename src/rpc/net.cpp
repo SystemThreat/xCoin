@@ -194,6 +194,8 @@ static RPCHelpMan getpeerinfo()
                                                               "best capture connection behaviors."},
                     {RPCResult::Type::STR, "transport_protocol_type", "Type of transport protocol: \n" + Join(TRANSPORT_TYPE_DOC, ",\n") + ".\n"},
                     {RPCResult::Type::STR, "session_id", "The session ID for this connection, or \"\" if there is none (\"v2\" transport protocol only).\n"},
+                    {RPCResult::Type::BOOL, "transport_hybrid", "Whether the \"v2\" session runs on hybrid post-quantum HX1 keys the peer has confirmed (see -v2hybrid).\n"
+                                                                "Compare it along with session_id: a matching session ID alone does not show the session is hybrid.\n"},
                 }},
             }},
         },
@@ -301,6 +303,7 @@ static RPCHelpMan getpeerinfo()
         obj.pushKV("connection_type", ConnectionTypeAsString(stats.m_conn_type));
         obj.pushKV("transport_protocol_type", TransportTypeAsString(stats.m_transport_type));
         obj.pushKV("session_id", stats.m_session_id);
+        obj.pushKV("transport_hybrid", stats.m_transport_hybrid);
 
         ret.push_back(std::move(obj));
     }
@@ -347,6 +350,9 @@ static RPCHelpMan addnode()
 
     if (use_v2transport && !node_v2transport) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: v2transport requested but not enabled (see -v2transport)");
+    }
+    if (!use_v2transport && command != "remove" && connman.GetV2HybridMode() == V2HybridMode::REQUIRE) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: v2transport=false is not allowed with -v2hybrid=2");
     }
 
     if (command == "onetry")
@@ -421,6 +427,9 @@ static RPCHelpMan addconnection()
 
     if (use_v2transport && !(connman.GetLocalServices() & NODE_P2P_V2)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: Adding v2transport connections requires -v2transport init flag to be set.");
+    }
+    if (!use_v2transport && connman.GetV2HybridMode() == V2HybridMode::REQUIRE) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: v2transport=false is not allowed with -v2hybrid=2");
     }
 
     const bool success = connman.AddConnection(address, conn_type, use_v2transport);
@@ -651,6 +660,17 @@ static RPCHelpMan getnetworkinfo()
                         {RPCResult::Type::NUM, "connections_in", "the number of inbound connections"},
                         {RPCResult::Type::NUM, "connections_out", "the number of outbound connections"},
                         {RPCResult::Type::BOOL, "networkactive", "whether p2p networking is enabled"},
+                        {RPCResult::Type::STR, "v2hybrid", "the hybrid post-quantum v2 transport mode, HX1 (-v2hybrid): \"off\", \"prefer\" or \"require\""},
+                        {RPCResult::Type::OBJ, "v2hybrid_counts", "HX1 handshake outcomes since startup",
+                        {
+                            {RPCResult::Type::NUM, "hybrid", "sessions that reached key confirmation"},
+                            {RPCResult::Type::NUM, "classical", "peers whose version packet carried no HX1 record (prefer mode)"},
+                            {RPCResult::Type::NUM, "refused", "peers require mode turned away"},
+                            {RPCResult::Type::NUM, "bad_record", "malformed HX1 records, and encapsulation keys that failed the FIPS 203 check"},
+                            {RPCResult::Type::NUM, "stage2_failed", "handshakes whose first stage-2 packet failed, or that timed out before key confirmation"},
+                            {RPCResult::Type::NUM, "local_error", "handshakes ended by this node's own ML-KEM or RNG failure"},
+                            {RPCResult::Type::NUM, "classical_retry", "classical retry connections opened"},
+                        }},
                         {RPCResult::Type::ARR, "networks", "information per network",
                         {
                             {RPCResult::Type::OBJ, "", "",
@@ -710,6 +730,13 @@ static RPCHelpMan getnetworkinfo()
         obj.pushKV("connections", node.connman->GetNodeCount(ConnectionDirection::Both));
         obj.pushKV("connections_in", node.connman->GetNodeCount(ConnectionDirection::In));
         obj.pushKV("connections_out", node.connman->GetNodeCount(ConnectionDirection::Out));
+        obj.pushKV("v2hybrid", std::string{V2HybridModeName(node.connman->GetV2HybridMode())});
+        UniValue hybrid_counts(UniValue::VOBJ);
+        const auto counts{node.connman->GetV2HybridCounts()};
+        for (size_t i{0}; i < counts.size(); ++i) {
+            hybrid_counts.pushKV(std::string{V2HybridOutcomeName(static_cast<V2HybridOutcome>(i))}, counts[i]);
+        }
+        obj.pushKV("v2hybrid_counts", std::move(hybrid_counts));
     }
     obj.pushKV("networks",      GetNetworksInfo());
     if (node.mempool) {

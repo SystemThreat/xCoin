@@ -114,9 +114,9 @@ bool HasCommitment(const CTransaction& tx)
 std::string GenesisMessage(std::string_view date)
 {
     // No numeral: this is the genesis, not a second one. The number is the
-    // whole supply in its smallest unit, 21,000,000 x 10^8. The charter hash is
+    // whole supply in its smallest unit, 100,000,000 x 10^8. The charter hash is
     // NOT repeated here — the full 32 bytes are in the coinbase's own output.
-    return "Hic experimentum prosperat - " + std::string{date} + " - 2,100,000,000,000,000 sats, 21M XCF";
+    return "Hic experimentum prosperat - " + std::string{date} + " - 10,000,000,000,000,000 sats, 100M XID";
 }
 
 CBlock CreateGenesisBlock(std::string_view message, uint32_t nTime, uint32_t nNonce, uint32_t nBits, int32_t nVersion)

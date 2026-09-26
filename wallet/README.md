@@ -1,6 +1,6 @@
 # xcoin-wallet
 
-A minimal, auditable **post-quantum** command-line wallet for xCoin (XCF).
+A minimal, auditable **post-quantum** command-line wallet for xCoin (XID).
 
 Every Xcoin address is an **ML-DSA-65** (FIPS 204, quantum-resistant) key. Addresses
 look like `xpa1z…` (`tnx1z…` on testnet). There is no non-quantum spend path — coins
@@ -132,9 +132,9 @@ plus this open-source tool could decode it.
 - Fees default to **auto-estimation from real transaction size**: ML-DSA signatures are
   ~3.3 KB and pubkeys ~2 KB per input, so a 1-in/2-out spend is ~5.4 KB (~1455 vbytes).
   The rate comes from `estimatesmartfee`, else your `fallbackfee`, else the relay floor.
-  Override with `--feerate` (XCF/kvB) or an absolute `--fee`.
-- `--max-fee` (default 0.1 XCF) refuses runaway fees.
-- Change below 0.00001 XCF is folded into the fee instead of creating dust.
+  Override with `--feerate` (XID/kvB) or an absolute `--fee`.
+- `--max-fee` (default 0.1 XID) refuses runaway fees.
+- Change below 0.00001 XID is folded into the fee instead of creating dust.
 - Every transaction is checked with `testmempoolaccept` before broadcast — a spend the
   network would reject (e.g. immature coinbase) never leaves the wallet.
 - `--dry-run` signs, decodes, and policy-checks without broadcasting anything.

@@ -58,7 +58,7 @@ and sets the address prefix, so a mislabelled port cannot make the explorer prin
 | `XCOIN_EXPLORER_BIND` | `127.0.0.1` | |
 | `XCOIN_EXPLORER_URL` | `http://localhost:<port>` | canonical / og base URL |
 | `XCOIN_ADDRESS_HRP` | from the node | `txa` / `xpa` |
-| `XCOIN_MAX_SUPPLY` | `21000000` | the cap the supply card is measured against |
+| `XCOIN_MAX_SUPPLY` | `100000000` | the cap the supply card is measured against, in XID |
 | `XCOIN_LEVY_BP` | `0` | settlement levy in basis points; the chain's rule is 0 |
 | `XCOIN_ADDNODE` | chain default | the peer line the home page suggests |
 | `XCOIN_STATS_DIR` | `./pool` | the pool's stats directory |
@@ -94,8 +94,10 @@ The Python mirrors `wallet-cli-regenesis/wallet_cli.py` and NerdMiner's
   blocks, coinbase maturity 1,000 blocks), the subsidy rule and the output rule.
   `/api/charter` returns the charter, and `/api/stats` carries it.
 - **The block reward card** reads the era subsidy at the tip from the chain
-  (`getblockstats`): 14 XCF in era 0, halving every 750,000 blocks, 21,000,000 XCF
-  cap. No premine.
+  (`getblockstats`), so the explorer never hardcodes the schedule. The cap is
+  100,000,000 XID. The network panel also states the schedule in words, from
+  `EMISSION_NOTE` in `xcoin-explorer.py`; that line states the final shape, the Annual Tenth (50 XID after <!-- [EMISSION-SHAPE] -->
+  the ramp, 10% less every 110,000 blocks, 1.5 XID floor, 0.1 XID tail). No premine.
 - **A rich list** at `/richlist`, built from the explorer's own scan of every block
   (it owns the UTXO set, which is also where exact input values, and so fees, come
   from — no node-side `txindex` needed).
@@ -105,7 +107,7 @@ The Python mirrors `wallet-cli-regenesis/wallet_cli.py` and NerdMiner's
 - **Isolation.** Analytics and the forum chat embed are off unless
   `XCOIN_EXPLORER_PUBLIC=1`, so a local run cannot pollute the live site's numbers.
 
-The unit is **XCF** on every page. Function names such as `sats_xat()` and the
+The unit is **XID** on every page. Function names such as `sats_xat()` and the
 cross-site tab script's `XATInstance` global are code names and never render.
 
 ## Tests
@@ -120,6 +122,6 @@ python3 -m unittest discover -s tests -v
   5 bp, bech32m and the witness decoder, and recomputes every case in
   `carry_v3_vector.json` when that file is present.
 - `tests/test_render.py` renders every page against a stub rehearsal chain
-  (14 XCF coinbases, one spend, one pending transaction) and checks what each one
-  says: XCF and never the old ticker, no levy text at the chain's 0 bp rule, and
+  (50 XID coinbases, a real Annual Tenth amount, one spend, one pending transaction) and checks what each one <!-- [EMISSION-SHAPE] -->
+  says: XID and never an old ticker (XAT, XCF), no levy text at the chain's 0 bp rule, and
   the levy rows back under a 5 bp override.

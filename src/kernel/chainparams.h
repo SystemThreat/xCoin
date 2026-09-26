@@ -22,6 +22,19 @@
 #include <unordered_map>
 #include <vector>
 
+/**
+ * True only in a local dress-rehearsal build (cmake -DXCOIN_REHEARSAL_BUILD=ON,
+ * contrib/regenesis/REHEARSAL-2.md), whose pasted genesis constants never leave the
+ * machine. Only such a build may compile GENESIS_IS_FINAL = true while the emission
+ * shape is PROVISIONAL (Consensus::EMISSION_SHAPE_IS_FINAL false; the static_assert
+ * in kernel/chainparams.cpp), and the node says so at startup.
+ */
+#ifdef XCOIN_REHEARSAL_BUILD
+inline constexpr bool IS_REHEARSAL_BUILD{true};
+#else
+inline constexpr bool IS_REHEARSAL_BUILD{false};
+#endif
+
 struct AssumeutxoHash : public BaseHash<uint256> {
     explicit AssumeutxoHash(const uint256& hash) : BaseHash(hash) {}
 };
@@ -186,13 +199,14 @@ protected:
 std::optional<ChainType> GetNetworkForMagic(const MessageStartChars& pchMessageStart);
 
 /**
- * Startup gate for the v2 mainnet (REGENESIS.md section 8, review follow-up):
- * a mainnet node built from a tree whose final genesis is not pasted yet
- * (GENESIS_IS_FINAL == false, the v1 placeholder genesis stands in) must not
- * start, or it would peer under the v2 magic with a provisional chain. Returns
- * the refusal text, or std::nullopt when the node may start: the chain is not
- * mainnet, its genesis is final, or -allowunfinalgenesis was given (tests and
- * the cutover dry run only).
+ * Startup gate for the v2 mainnet and testnet A (REGENESIS.md section 8, review
+ * follow-ups): a node built from a tree whose genesis for that chain is not final
+ * (GENESIS_IS_FINAL or TESTNET_GENESIS_IS_FINAL false, the v1 placeholder genesis
+ * stands in) must not start, or it would open a chain on the placeholder header,
+ * or peer under the chain's magic with nodes on a different genesis. Returns the
+ * refusal text, or std::nullopt when the node may start: the chain is regtest,
+ * its genesis is final, or -allowunfinalgenesis was given (tests and the
+ * cutover dry run only).
  */
 std::optional<std::string> CheckGenesisFinalityForStartup(const CChainParams& params, bool allow_unfinal_genesis);
 

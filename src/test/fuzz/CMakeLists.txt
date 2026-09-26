@@ -67,6 +67,7 @@ add_executable(fuzz
   miniscript.cpp
   minisketch.cpp
   mini_miner.cpp
+  mlkem768.cpp
   muhash.cpp
   multiplication_overflow.cpp
   net.cpp
@@ -77,6 +78,7 @@ add_executable(fuzz
   overflow.cpp
   p2p_handshake.cpp
   p2p_headers_presync.cpp
+  p2p_transport_hx1.cpp
   p2p_transport_serialization.cpp
   pcp.cpp
   package_eval.cpp

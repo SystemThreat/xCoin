@@ -88,6 +88,7 @@ from test_framework.util import (
     wait_until_helper_internal,
 )
 from test_framework.v2_p2p import (
+    DEFAULT_HX1_MODE,
     EncryptedP2PState,
     MSGTYPE_TO_SHORTID,
     SHORTID,
@@ -196,21 +197,21 @@ class P2PConnection(asyncio.Protocol):
         self.magic_bytes = MAGIC_BYTES[net]
         self.p2p_connected_to_node = dstport != 0
 
-    def peer_connect(self, dstaddr, dstport, *, net, timeout_factor, supports_v2_p2p):
+    def peer_connect(self, dstaddr, dstport, *, net, timeout_factor, supports_v2_p2p, v2hybrid=DEFAULT_HX1_MODE):
         self.peer_connect_helper(dstaddr, dstport, net, timeout_factor)
         if supports_v2_p2p:
-            self.v2_state = EncryptedP2PState(initiating=True, net=net)
+            self.v2_state = EncryptedP2PState(initiating=True, net=net, hybrid_mode=v2hybrid)
 
         loop = NetworkThread.network_event_loop
         logger.debug('Connecting to Bitcoin Node: %s:%d' % (self.dstaddr, self.dstport))
         coroutine = loop.create_connection(lambda: self, host=self.dstaddr, port=self.dstport)
         return lambda: loop.call_soon_threadsafe(loop.create_task, coroutine)
 
-    def peer_accept_connection(self, connect_id, connect_cb=lambda: None, *, net, timeout_factor, supports_v2_p2p, reconnect):
+    def peer_accept_connection(self, connect_id, connect_cb=lambda: None, *, net, timeout_factor, supports_v2_p2p, reconnect, v2hybrid=DEFAULT_HX1_MODE):
         self.peer_connect_helper('0', 0, net, timeout_factor)
         self.reconnect = reconnect
         if supports_v2_p2p:
-            self.v2_state = EncryptedP2PState(initiating=False, net=net)
+            self.v2_state = EncryptedP2PState(initiating=False, net=net, hybrid_mode=v2hybrid)
 
         logger.debug('Listening for Bitcoin Node with id: {}'.format(connect_id))
         return lambda: NetworkThread.listen(self, connect_cb, idx=connect_id)
@@ -295,8 +296,15 @@ class P2PConnection(asyncio.Protocol):
         assert self.v2_state.peer
         length, is_mac_auth = self.v2_state.authenticate_handshake(self.recvbuf)
         if not is_mac_auth:
+            if self.v2_state.failure_reason is not None:
+                raise ValueError(f"v2 handshake failed: {self.v2_state.failure_reason}")
             raise ValueError("invalid v2 mac tag in handshake authentication")
         self.recvbuf = self.recvbuf[length:]
+        # With HX1 (XIP-4), the initiator's version packet is only produced once the responder's has been read. It
+        # must go out before our version message. (Always empty in HX1 mode 0.)
+        pending_handshake_bytes = self.v2_state.take_pending_handshake_bytes()
+        if pending_handshake_bytes:
+            self.send_raw_message(pending_handshake_bytes)
         if self.v2_state.tried_v2_handshake:
             # for v2 outbound connections, send version message immediately after v2 handshake
             if self.p2p_connected_to_node:
@@ -333,8 +341,10 @@ class P2PConnection(asyncio.Protocol):
                         return
                     self.recvbuf = self.recvbuf[msglen:]
 
-                    if msg is None:  # ignore decoy messages
-                        return
+                    if msg is None:
+                        # A decoy: ignore it and read on. (An HX1 responder's confirmation packet, XIP-4, is a decoy
+                        # that can arrive in the same read as the messages after it.)
+                        continue
                     assert msg  # application layer messages (which aren't decoy messages) are non-empty
                     shortid = msg[0]  # 1-byte short message type ID
                     if shortid == 0:
