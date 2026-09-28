@@ -1014,7 +1014,7 @@ func main() {
     if args.count > 1, ["version","--version","-v"].contains(args[1]) { print("NerdMiner \(nerdMinerVersion) (MetalDAG engine 3.2, login v1)"); return }
     var minerAddress = ""
     var workerName = "cli"
-    var mode = "solo"                   // --mode solo|shared (shared = 0%-fee PPLNS split payouts)
+    var mode = "solo"                   // --mode solo|shared (shared only appends "-shared" to the worker name)
     var baseOverride: UInt64? = nil     // --base <unixtime>: align MetalDAG epoch to a node
     var statsPort: UInt16 = statsDefaultPort   // --stats-port N: companion HTTP stats on 127.0.0.1
     var statsEnabled = true                    // --no-stats: don't start the companion server
@@ -1045,16 +1045,15 @@ func main() {
     guard !minerAddress.isEmpty else {
         print("NerdMiner v\(nerdMinerVersion) - xCoin MetalDAG Edition")
         print("  NerdMiner login [<challenge-id>]     sign in to MineDifferent with your xCoin identity (xid1…)")
-        print("The testnet A rehearsal is running — mine with a txa1r... address. The mainnet genesis is not mined yet.")
+        print("Mainnet is live: mine to a witness v3 xpa1r... address and pass --base 1790380800 (the mainnet genesis time).")
         print("")
-        print("Usage: NerdMiner <txa1r-address> [--pool host:port] [--worker name] [--mode solo|shared] [--base <unixtime>]")
-        print("  --mode solo   (default) find a block, keep the whole reward")
-        print("  --mode shared join the 0%-fee community pool — steady payouts split by work (PPLNS)")
+        print("Usage: NerdMiner <xpa1r-address> [--pool host:port] [--worker name] [--base <unixtime>]")
         print("  --base <unixtime> MetalDAG epoch base = the genesis time from the node's getblock of block 0")
-        print("                   (testnet A is built in; mainnet needs it once its genesis is mined)")
+        print("                   (mainnet: 1790380800; this build does not carry it yet)")
         print("  --stats-port N   companion stats server port (default \(statsDefaultPort), loopback only)")
         print("  --no-stats       do not start the companion stats server")
-        print("Testnet A: NerdMiner txa1r... --pool 172.96.186.49:3335 --worker rehearsal1")
+        print("Solo:      NerdMiner xpa1r... --pool pool.xcoinminer.com:3335 --base 1790380800 --worker rig1")
+        print("PPLNS:     NerdMiner xpa1r... --pool 198.252.101.117:3336 --base 1790380800 --worker rig1")
         print("Forum:     NerdMiner login --index 101")
         print("Telemetry is disabled by default; set NERDMINER_TELEMETRY=1 to opt in.")
         return
@@ -1066,12 +1065,13 @@ func main() {
             print("    An xid1... string is your forum identity, not a payout address; coins cannot be sent to it.")
             print("    It is only for `NerdMiner login`; mine to a payout address.")
         }
-        print("    Testnet A addresses start with txa1r..., mainnet with xpa1r... (witness v3, bech32m).")
+        print("    Mainnet addresses start with xpa1r... (witness v3, bech32m); testnet A (txa1r...) is retired.")
         print("    A ...1z... address is witness v2, which this chain does not pay.")
         print("    Double-check it with `xcoin-wallet address`, then run again.")
         return
     }
-    // Shared mode opts into PPLNS: the pool routes on a "-shared" worker suffix.
+    // --mode shared only appends "-shared" to the worker name; xcoin-pool does not route on it,
+    // the pool you connect to decides how it pays (solo on :3335, PPLNS on :3336).
     if mode == "shared" && !workerName.lowercased().hasSuffix("-shared") {
         workerName += "-shared"
     }
@@ -1118,8 +1118,8 @@ func main() {
         print("[+] MetalDAG base overridden -> \(b) (epoch alignment to node)")
     }
     if gpu.dagParams.baseTime == MetalDAGParams.mainnetBaseTimePending {
-        print("[-] The mainnet genesis is not mined yet, so its MetalDAG base time is unknown here.")
-        print("    Pass --base <genesis unix time> from the node's getblock of block 0, or mine testnet A with a txa1r... address.")
+        print("[-] This NerdMiner does not carry the mainnet genesis time, so the MetalDAG epoch is unknown.")
+        print("    Pass --base 1790380800 (the time of block 0 in the node's getblock).")
         return
     }
     print("[+] GPU: \(gpu.gpuName)")
