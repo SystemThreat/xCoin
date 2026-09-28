@@ -222,7 +222,8 @@ breaking elliptic curves later does not reveal it. `-v2hybrid` sets the mode: `1
 (prefer, the default) uses HX1 with every peer that takes part and stays classical with
 one that does not; `2` (require) disconnects such peers and never falls back to v1; `0`
 turns it off. Leave the default: on a young network `require` can leave a node with
-fewer peers.
+fewer peers, and a listening node in `require` refuses every inbound v1 connection, so a
+new node, whose first contact is v1 (below), cannot connect to it.
 
 Check it:
 
@@ -235,11 +236,12 @@ A post-quantum session shows `"transport_protocol_type": "v2"` and
 `"transport_hybrid": true`; `v2hybrid_counts` counts the handshake outcomes since start.
 
 The first sync may be classical. The DNS and fixed seeds hand out bare addresses that say
-nothing about v2, and 31.99.0 treats such an address as v1-only: a brand-new 31.99.0 node
-makes its first connections, and its whole first sync, over plain v1, and uses HX1 once it
-has met its peers (after its first restart, for example). 31.99.1 tries v2 with HX1 on
-seed addresses first and falls back to v1 only for a peer that does not speak v2. On
-either version, a peer given with `-addnode` or `addnode` is tried over v2 first.
+nothing about v2, and in the default mode the node treats such an address as v1-only: a
+brand-new node makes its first connections, and its whole first sync, over plain v1, and
+uses HX1 once it has met its peers (after its first restart, for example). A peer given
+with `-addnode` or `addnode` is tried over v2 first, so the `addnode` lines under [If it
+finds no peers](#if-it-finds-no-peers) give a new node HX1 connections to those peers from
+the start.
 
 ### Ports
 
