@@ -36,6 +36,13 @@ What changed
   `172.96.186.49` (New York), `198.252.107.13` (Hong Kong), `103.119.217.105` (London),
   `198.252.101.117` (Singapore) and `54.20.130.14` (São Paulo), all on 9333
   (`contrib/seeds/nodes_main.txt`, `src/chainparamsseeds.h`). The DNS seeds are unchanged.
+- **First contact over HX1.** An address from a DNS seed or a fixed seed carries no word
+  about what the node there supports. 31.99.0, in the default mode, treated such an
+  address as v1-only, so a brand-new node made its first connections, and its whole first
+  sync, over classical v1, and used HX1 only once it had met its peers. 31.99.1 assumes v2
+  for seed addresses and tries v2 with HX1 first; a peer that does not speak v2 is retried
+  over v1 as before, and `-v2transport=0` still connects over v1. The DNS seed query
+  itself is unchanged.
 - **A release build.** The version is 31.99.1 and the build is marked as a release, so
   the node no longer shows "This is a pre-release test build - use at your own risk - do
   not use for mining or merchant applications" in `debug.log` or in the `warnings` of
@@ -65,17 +72,11 @@ Known and unchanged on purpose
   stay. On a machine that also runs `bitcoind` or `litecoind`, set `rpcport=` and/or
   `port=` in `nex.conf` (README, "Ports").
 - `nexd -testnet` still refuses to start: testnet A is retired.
-- **First contact is still classical; this is not the seed-v2 release.** An address from
-  a DNS seed or a fixed seed says nothing about v2, and in the default mode 31.99.1, like
-  31.99.0, treats it as v1-only: a brand-new node makes its first connections, and its
-  whole first sync, over plain v1, and uses HX1 once it has met its peers. Trying v2
-  first on seed addresses comes in a later release.
 - **Keep `-v2hybrid=2` (require) off on public nodes.** Require mode refuses every inbound
-  v1 connection, so a node that newcomers reach through the seeds would turn away every
-  new node, on 31.99.0 and on 31.99.1 alike. Leave public nodes on the default
-  `-v2hybrid=1` (prefer). This holds even after the seed-v2 release ships, for as long as
-  31.99.0 nodes still join: a 31.99.0 node makes its first contact over v1 whatever the
-  seed runs.
+  v1 connection. A new 31.99.0 node makes its first contact over v1 whatever the seed
+  runs, so a node that newcomers reach through the seeds would turn away every new
+  31.99.0 node. Leave public nodes on the default `-v2hybrid=1` (prefer) until the
+  31.99.0 nodes have upgraded, even though a new 31.99.1 node's first contact is v2.
 
 Upgrade in place
 ----------------
@@ -138,5 +139,5 @@ Roll back
 Stop 31.99.1 as in step 3 and start the 31.99.0 binaries (`build/bin/nexd`, or the
 copies you kept) with the same options and data directory. Nothing is converted in
 either direction. The only thing a rolled-back node loses is the 31.99.1 behaviour
-above: its fixed-seed list is back to one entry, and it shows the pre-release warning
-again.
+above: its fixed-seed list is back to one entry, it treats seed addresses as v1 again, and
+it shows the pre-release warning again.
