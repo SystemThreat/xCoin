@@ -112,7 +112,7 @@ sudo apt-get install -y --no-install-recommends \
 git clone https://github.com/SystemThreat/xCoin.git
 cd xCoin
 cmake -B build -DENABLE_IPC=OFF -DWITH_EMBEDDED_ASMAP=OFF -DBUILD_BENCH=OFF -DBUILD_TESTS=OFF
-cmake --build build -j
+cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
 ```
 
 `main` is the current release. Releases are also tagged: `mainnet-genesis-2026-09-26` is
@@ -122,8 +122,9 @@ before `cmake` builds one exactly).
 The compile takes roughly 10 to 20 minutes on a recent Mac and much longer on a small
 VPS; a handful of compiler warnings is normal. Each compiler process wants about 1.5 GB
 of memory. On a small machine (2 cores, 3 GB) add 4 GB of swap and build with
-`cmake --build build -j2`. Leave `-DBUILD_TESTS=OFF` out if you want the unit test
-binary `build/bin/test_bitcoin` as well.
+`cmake --build build -j2`. Always give `-j` a number: with none, the default Makefile
+generator starts every compile at once. Leave `-DBUILD_TESTS=OFF` out if you want the
+unit test binary `build/bin/test_bitcoin` as well.
 
 The results are `build/bin/nexd` (the node) and `build/bin/nex-cli` (its RPC client).
 `build/bin/nexd -version` prints the release: the tag for a build of a tagged commit,
@@ -135,7 +136,7 @@ Mainnet is the default chain; no network flag is needed. The node finds its peer
 through the DNS seeds compiled into it and talks to them on P2P port 9333.
 
 ```sh
-build/bin/nexd -server -daemon
+build/bin/nexd -server -daemonwait
 ```
 
 Or put the same thing in `nex.conf` and start `nexd` with no arguments (mainnet options
@@ -143,8 +144,13 @@ go at the top of the file, before any `[section]`):
 
 ```
 server=1
-daemon=1
+daemonwait=1
 ```
+
+`-daemonwait` puts the node in the background once it is up and its RPC answers, or
+prints "Error during initialization - check debug.log for details" if it could not start
+(a port already in use, a data directory of another chain). Plain `-daemon` returns at
+once and reports nothing.
 
 `listen` is on by default. Open TCP 9333 on your firewall or router if you want other
 nodes to dial you; the node works without it, and `-listen=0` turns inbound off. Keep
@@ -250,11 +256,17 @@ the start.
 | P2P | 9333 (open it for inbound peers) | Litecoin's P2P port |
 | RPC | 8332 (localhost only; never open it) | Bitcoin Core's RPC port |
 
-If `bitcoind` runs on the same machine, `nexd` cannot take 8332 and stops at startup
-("Unable to start HTTP server"), or, if `bitcoind` started second, `nex-cli` reaches
-`bitcoind` with the wrong cookie ("Authorization failed: Incorrect rpcuser or
-rpcpassword"). The same goes for `litecoind` and 9333. The defaults stay as they are, so
-that no running node changes; give xCoin its own ports in `nex.conf` instead:
+If `bitcoind` already holds 8332 on the same machine, `nexd` cannot start its RPC server
+and exits; its `debug.log` shows "Unable to bind any endpoint for RPC server" and
+"Unable to start HTTP server. See debug log for details." `-daemonwait` reports that as
+"Error during initialization". Started with plain `-daemon`, it has already printed "NEX
+starting" and returned, so the first sign is `nex-cli`, which reaches `bitcoind` without
+a cookie: "Could not locate RPC credentials. No authentication cookie could be found, and
+RPC password is not set." (Started first, `nexd` keeps 8332 and `bitcoind` is the one
+that fails.) If `litecoind` holds 9333, `nexd` stops with "Unable to bind to
+0.0.0.0:9333 on this computer. NEX is probably already running." The defaults stay as
+they are, so that no running node changes; give xCoin its own ports in `nex.conf`
+instead:
 
 ```
 rpcport=29432
@@ -262,7 +274,9 @@ port=29333
 ```
 
 `nex-cli` reads `rpcport` from the same file. If you set it on the command line instead,
-pass the same `-rpcport` to every `nex-cli` call, and give a pool `XCOIN_RPC_PORT`.
+pass the same `-rpcport` to every `nex-cli` call (without it, `nex-cli` reaches `bitcoind`
+on 8332 and fails with "Authorization failed: Incorrect rpcuser or rpcpassword"), and
+give a pool `XCOIN_RPC_PORT`.
 
 ### Stop and upgrade
 
@@ -286,7 +300,7 @@ git clone https://github.com/SystemThreat/xCoin.git && cd xCoin
 cmake -B build -DENABLE_IPC=OFF -DWITH_EMBEDDED_ASMAP=OFF -DBUILD_BENCH=OFF -DBUILD_TESTS=OFF
 cmake --build build -j2
 sudo ufw allow 9333/tcp            # only if you want inbound peers
-build/bin/nexd -server -daemon
+build/bin/nexd -server -daemonwait
 build/bin/nex-cli getblockhash 0   # must print 3bc1a36d…79f2
 ```
 

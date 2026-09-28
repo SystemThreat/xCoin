@@ -80,25 +80,37 @@ The node keeps running while you build, and the old binaries stay where they are
 going back is one restart.
 
 1. Build 31.99.1 into its own directory, next to the 31.99.0 build, from a clone
-   updated to the release (`git pull` on `main`, or `git fetch --tags` and
-   `git checkout <tag>`):
+   updated to the release (`git checkout main && git pull --ff-only`, or
+   `git fetch --tags` and `git checkout <tag>`):
 
    ```sh
    cmake -B build-31.99.1 -DENABLE_IPC=OFF -DWITH_EMBEDDED_ASMAP=OFF -DBUILD_BENCH=OFF -DBUILD_TESTS=OFF
-   cmake --build build-31.99.1 -j
+   cmake --build build-31.99.1 -j2      # 2 on a 2-core, 3 GB machine; the core count on a big one
    build-31.99.1/bin/nexd -version
    ```
 
+   Always give `-j` a number while the node is running. With no number, the default
+   Makefile generator starts every compile at once, about 1.5 GB each, and on a small
+   VPS the kernel's out-of-memory killer may pick the node. A 2-core, 3 GB machine needs
+   4 GB of swap for `-j2` (README, "Build"). A machine too small to build next to its
+   node (1 or 2 GB of memory, for example) gets `nexd` and `nex-cli` built the same way
+   on another Ubuntu 24.04 machine with the same packages and copied into
+   `build-31.99.1/bin/` on the node.
+
 2. Note where the running node stands: `build/bin/nex-cli getblockcount`.
-3. Stop it and wait until it has exited:
+3. Stop it and wait until it has exited. If the node runs with `-datadir=` or `-conf=`,
+   give the same options to every `nex-cli` call in steps 2, 3 and 5:
 
    ```sh
    build/bin/nex-cli stop
-   while pgrep -x nexd >/dev/null; do sleep 1; done
+   while pgrep -x nexd >/dev/null; do sleep 1; done   # one nexd on this machine; otherwise wait for "Shutdown done" in its debug.log
    ```
 
 4. Start the new binary with exactly the options, data directory and `nex.conf` the old
-   one used, for example `build-31.99.1/bin/nexd -server -daemon`. No `-reindex`.
+   one used, with `-daemonwait` in place of `-daemon`, for example
+   `build-31.99.1/bin/nexd -server -daemonwait`. No `-reindex`. `-daemonwait` returns
+   once the node is up, or prints "Error during initialization - check debug.log for
+   details"; in that case start the old binary again and read the log.
 5. Check it:
 
    ```sh
