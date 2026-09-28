@@ -22,13 +22,10 @@ Ordinary bugs, documentation errors and feature requests go to the public issue 
 
 ## How to report
 
-> **TODO (founder):** no private channel is published yet. GitHub private vulnerability
-> reporting is off for this repository, and there is no security@ address on an xCoin
-> domain. Turn on private vulnerability reporting (repository Settings → Security) or
-> publish a security address, then replace this block with it.
-
-Until that channel exists, open a public issue titled only "Security contact request",
-with no details in it, and wait for a private channel before you send anything.
+Use GitHub's private vulnerability reporting: open
+[github.com/SystemThreat/xCoin/security/advisories/new](https://github.com/SystemThreat/xCoin/security/advisories/new),
+or the **Security** tab of this repository and then **Report a vulnerability**. Only the
+maintainers see the report. You need a GitHub account.
 
 Include in the report:
 
