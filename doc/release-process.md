@@ -90,6 +90,14 @@ To tag the version (or release candidate) in git, use the `make-tag.py` script f
 
 This will perform a few last-minute consistency checks in the build system files, and if they pass, create a signed tag.
 
+**xCoin:** tag the release commit with an annotated tag, as `mainnet-genesis-2026-09-26` was, for example
+`git tag -a <name> -m "NEX 31.99.1"` (`git tag -s` makes a signed tag, which is annotated too). The build reads
+the tag with `git describe --abbrev=0` (`cmake/script/GenerateBuildInfo.cmake`), which skips lightweight tags, so a
+build of a commit that has only a lightweight tag (`git tag <name>`, like `v31.99.0-pre1`) prints `v31.99.1` in
+`nexd -version`, not the tag. `git cat-file -t <name>` prints `tag` for an annotated tag and `commit` for a
+lightweight one. Tag before building the release binaries, and build from a tree with no local changes: a build
+made before the tag existed, or with local changes, prints `v31.99.1` too.
+
 ## Building
 
 ### First time / New builders

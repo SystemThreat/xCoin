@@ -127,8 +127,8 @@ generator starts every compile at once. Leave `-DBUILD_TESTS=OFF` out if you wan
 unit test binary `build/bin/test_bitcoin` as well.
 
 The results are `build/bin/nexd` (the node) and `build/bin/nex-cli` (its RPC client).
-`build/bin/nexd -version` prints the release: the tag for a build of a tagged commit,
-otherwise `v31.99.1`.
+`build/bin/nexd -version` prints the release: the tag for a build of a commit with an
+annotated release tag and no local changes, otherwise `v31.99.1`.
 
 ### Run a mainnet node
 
@@ -246,10 +246,11 @@ The first sync may be classical. The DNS and fixed seeds hand out bare addresses
 nothing about v2, and 31.99.0, in the default mode, treats such an address as v1-only: a
 brand-new 31.99.0 node makes its first connections, and its whole first sync, over plain v1,
 and uses HX1 once it has met its peers (after its first restart, for example). 31.99.1
-tries v2 with HX1 on seed addresses first and falls back to v1 only for a peer that does
-not speak v2. On either version, a peer given with `-addnode` or `addnode` is tried over v2
-first, so the `addnode` lines under [If it finds no peers](#if-it-finds-no-peers) give even
-a new 31.99.0 node HX1 connections to those peers from the start.
+tries v2 with HX1 on seed addresses first and falls back to v1 when the v2 attempt is closed
+before the peer answers: a peer that does not speak v2, or one with no free inbound slot. On
+either version, a peer given with `-addnode` or `addnode` is tried over v2 first, so the
+`addnode` lines under [If it finds no peers](#if-it-finds-no-peers) give even a new 31.99.0
+node HX1 connections to those peers from the start.
 
 ### Ports
 

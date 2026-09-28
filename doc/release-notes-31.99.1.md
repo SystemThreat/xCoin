@@ -42,13 +42,16 @@ What changed
   sync, over classical v1, and used HX1 only once it had met its peers. 31.99.1 assumes v2
   for seed addresses and tries v2 with HX1 first; a peer that does not speak v2 is retried
   over v1 as before, and `-v2transport=0` still connects over v1. The DNS seed query
-  itself is unchanged.
+  itself is unchanged. Seed addresses a 31.99.1 node passes on to its peers carry the same
+  v2 assumption, so those peers, 31.99.0 nodes included, may also try v2 first; a peer
+  that does not speak v2 is still reached over v1.
 - **A release build.** The version is 31.99.1 and the build is marked as a release, so
   the node no longer shows "This is a pre-release test build - use at your own risk - do
   not use for mining or merchant applications" in `debug.log` or in the `warnings` of
   `getblockchaininfo` and `getnetworkinfo`. That text was the inherited Bitcoin Core
   template and said nothing about the chain. `nexd -version` prints the release tag for
-  a build of a tagged commit, otherwise `v31.99.1` with no commit suffix.
+  a build of a commit with an annotated release tag and no local changes (the build
+  ignores lightweight tags), otherwise `v31.99.1` with no commit suffix.
 - **xcoin-pool: PPLNS mode and miner slots.** `XCOIN_POOL_MODE=pplns` makes the pool pay
   the miners of the last N shares directly in every block's coinbase, pro rata by
   credited difficulty, plus one fee output (`XCOIN_POOL_FEE_BP`, default 299 = 2.99%, to
@@ -139,5 +142,7 @@ Roll back
 Stop 31.99.1 as in step 3 and start the 31.99.0 binaries (`build/bin/nexd`, or the
 copies you kept) with the same options and data directory. Nothing is converted in
 either direction. The only thing a rolled-back node loses is the 31.99.1 behaviour
-above: its fixed-seed list is back to one entry, it treats seed addresses as v1 again, and
-it shows the pre-release warning again.
+above: its fixed-seed list is back to one entry, seed addresses it learns from then on are
+treated as v1 again (entries 31.99.1 already stored in `peers.dat` keep the v2 assumption
+until a connection reports their real services; the v1 retry covers them), and it shows
+the pre-release warning again.
