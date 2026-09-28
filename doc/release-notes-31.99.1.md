@@ -50,8 +50,12 @@ What changed
   before. See `xcoin-pool/README.md`.
 - **Documentation.** The README is rewritten for mainnet (build, run, check the chain
   against the explorer, peers, the HX1 transport, ports, mining, wallets); SECURITY.md
-  is xCoin's own policy instead of Bitcoin Core's; INSTALL.md points at the README; the
-  testnet A VPS scripts are marked as history.
+  is xCoin's own policy instead of Bitcoin Core's, and the GitHub issue templates point
+  at it instead of at Bitcoin Core; INSTALL.md points at the README; `xcoin-pool/README.md`
+  and `miner/README.md` describe the mainnet pools; the testnet A VPS scripts are marked
+  as history.
+- **NerdMiner's usage text** names mainnet, `xpa1r…` addresses, `--base 1790380800` and
+  the two public pools instead of testnet A. Nothing else in the miner changed.
 
 Known and unchanged on purpose
 ------------------------------
