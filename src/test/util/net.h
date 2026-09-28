@@ -129,6 +129,13 @@ struct ConnmanTestMsg : public CConnman {
         PerformReconnections();
     }
 
+    /** Run the DNS seed thread's body once, synchronously. With an empty addrman it queries every DNS seed at once
+     *  and returns; mock g_dns_lookup first, and use no -proxy, or it opens ADDR_FETCH connections instead. */
+    void ThreadDNSAddressSeedPublic() EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_nodes_mutex)
+    {
+        ThreadDNSAddressSeed();
+    }
+
     /** A queued reconnection: its destination (or address), whether it uses v2, and whether it is an HX1 classical
      *  retry itself (a MANUAL destination's retry is a mark on the destination instead). */
     struct QueuedReconnection {

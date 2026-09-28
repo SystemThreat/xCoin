@@ -1555,11 +1555,12 @@ BOOST_FIXTURE_TEST_CASE(seed_addresses_use_v2, HX1ConnmanSetup)
         m_connman->AddLocalServices(NODE_P2P_V2);
     }
 
-    // Prefer mode: open a connection to a seed-tagged address the way ThreadOpenConnections does. It is v2: the node
-    // sends its ElligatorSwift key first. A v1-only seed drops that key without a byte back; the node reconnects with
-    // v1, so a seed that does not speak v2 is not stranded.
+    // Prefer mode: open a connection to a fixed seed the way ThreadOpenConnections does. It is v2: the node sends its
+    // ElligatorSwift key first. A v1-only seed drops that key without a byte back; the node reconnects with v1, so a
+    // seed that does not speak v2 is not stranded. The services are the ones ConvertSeeds() gave the first mainnet
+    // seed; the address is a stand-in, and every socket here is a mocked pipe.
     m_connman->SetV2HybridMode(V2HybridMode::PREFER);
-    const CAddress seed{LookupNumeric(Dest(14), Params().GetDefaultPort()), SeedAddressServiceFlags()};
+    const CAddress seed{LookupNumeric(Dest(14), Params().GetDefaultPort()), seeds.front().nServices};
     BOOST_REQUIRE(m_connman->OpenNetworkConnection(seed, false, {}, /*pszDest=*/nullptr, ConnectionType::OUTBOUND_FULL_RELAY,
                                                    m_connman->UseV2TransportTo(seed.nServices)));
     auto pipes{m_pipes.back()};
@@ -1585,6 +1586,63 @@ BOOST_FIXTURE_TEST_CASE(seed_addresses_use_v2, HX1ConnmanSetup)
     BOOST_CHECK(m_connman->TestNodes().back()->m_transport->GetInfo().transport_type == TransportProtocolType::V1);
     m_connman->ClearTestNodes();
     m_connman->AddLocalServices(NODE_P2P_V2);
+}
+
+BOOST_FIXTURE_TEST_CASE(dns_seed_addresses_use_v2, HX1ConnmanSetup)
+{
+    // A new node with no proxy resolves "x9.<seed>" itself and stores each answer with SeedAddressServiceFlags(), so
+    // its first automatic connection to a DNS-seeded address is v2. The resolver is mocked: nothing is looked up.
+    BOOST_REQUIRE(Params().DNSSeeds() == std::vector<std::string>{"dummySeed.invalid."});
+    BOOST_REQUIRE_EQUAL(m_addrman.Size(), 0U);
+    BOOST_REQUIRE(!HaveNameProxy());
+    const std::vector<CNetAddr> answers{*LookupHost("1.2.3.21", /*fAllowLookup=*/false),
+                                        *LookupHost("5.6.7.22", /*fAllowLookup=*/false)};
+
+    std::vector<std::string> lookups;
+    {
+        struct RestoreResolver {
+            DNSLookupFn orig{g_dns_lookup};
+            ~RestoreResolver() { g_dns_lookup = orig; }
+        } restore;
+        g_dns_lookup = [&](const std::string& name, bool allow_lookup) {
+            lookups.push_back(name);
+            BOOST_CHECK(allow_lookup);
+            return answers;
+        };
+        m_connman->ThreadDNSAddressSeedPublic();
+    }
+    // The query is unchanged: "x9." asks the seeder for NODE_NETWORK|NODE_WITNESS nodes, as the DNS records expect.
+    BOOST_REQUIRE_EQUAL(lookups.size(), 1U);
+    BOOST_CHECK_EQUAL(lookups[0], "x9.dummySeed.invalid.");
+
+    const std::vector<CAddress> added{m_addrman.GetAddr(/*max_addresses=*/0, /*max_pct=*/0, /*network=*/std::nullopt, /*filtered=*/false)};
+    BOOST_REQUIRE_EQUAL(added.size(), answers.size());
+    for (const CAddress& addr : added) {
+        BOOST_CHECK(std::find(answers.begin(), answers.end(), CNetAddr{addr}) != answers.end());
+        BOOST_CHECK_EQUAL(addr.GetPort(), Params().GetDefaultPort());
+        BOOST_CHECK_EQUAL(addr.nServices, SeedAddressServiceFlags());
+    }
+
+    // Pick a peer from addrman as ThreadOpenConnections does: v2 in every mode, v1 only with -v2transport=0.
+    const CAddress addr{m_addrman.Select(/*new_only=*/false, g_reachable_nets.All()).first};
+    BOOST_REQUIRE(addr.IsValid());
+    for (const auto mode : {V2HybridMode::OFF, V2HybridMode::PREFER, V2HybridMode::REQUIRE}) {
+        m_connman->SetV2HybridMode(mode);
+        BOOST_CHECK(m_connman->UseV2TransportTo(addr.nServices));
+        m_connman->RemoveLocalServices(NODE_P2P_V2);
+        BOOST_CHECK(!m_connman->UseV2TransportTo(addr.nServices));
+        m_connman->AddLocalServices(NODE_P2P_V2);
+    }
+
+    // Prefer mode: the connection starts as v2 and the node's first bytes are its ElligatorSwift key.
+    m_connman->SetV2HybridMode(V2HybridMode::PREFER);
+    BOOST_REQUIRE(m_connman->OpenNetworkConnection(addr, false, {}, /*pszDest=*/nullptr, ConnectionType::OUTBOUND_FULL_RELAY,
+                                                   m_connman->UseV2TransportTo(addr.nServices)));
+    BOOST_REQUIRE_EQUAL(m_connman->TestNodes().size(), 1U);
+    BOOST_CHECK(m_connman->TestNodes().back()->m_transport->GetInfo().transport_type == TransportProtocolType::DETECTING);
+    Step();
+    BOOST_CHECK_GE(Drain(m_pipes.back()->send).size(), EllSwiftPubKey::size());
+    m_connman->ClearTestNodes();
 }
 
 BOOST_FIXTURE_TEST_CASE(removenode_clears_retry_mark, HX1ConnmanSetup)
