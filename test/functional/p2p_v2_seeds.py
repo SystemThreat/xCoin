@@ -11,9 +11,12 @@ the node reconnects with v1, as Bitcoin Core does. -v2transport=0 still connects
 Regtest has no fixed seeds, so the nodes here run mainnet with -fixedseeds=1. Every outbound connection goes
 through a local SOCKS5 proxy that sends it to another test node on 127.0.0.1: nothing leaves this machine.
 
-The test does not assume how many fixed seeds mainnet has. A fresh node connects to one seed per IPv4 /16, all of
-which the proxy sends to the same stand-in node, so attempts and proxy requests are matched by address and the two
-ends of each connection by session id. The v1-only case runs with -maxconnections=1, so exactly one seed is tried.
+The test works with any number of IPv4 fixed seeds spread over up to 8 distinct /16s (31.99.1 has five, in four
+/16s). A fresh node connects to one seed per /16, all of which the proxy sends to the same stand-in node, so attempts
+and proxy requests are matched by address and the two ends of each connection by session id. With more /16s than the
+8 outbound full-relay slots, the node would also open block-relay-only connections to seeds, which the first two
+cases do not expect; outbound_count() stops the test with a message then instead of letting it time out. The v1-only
+case runs with -maxconnections=1, so exactly one seed is tried, however many /16s there are.
 """
 import re
 
@@ -107,13 +110,17 @@ class P2PV2SeedsTest(BitcoinTestFramework):
     @staticmethod
     def outbound_count(seeds):
         """How many of `seeds` a fresh node with the default -maxconnections connects to: one per IPv4 /16 (outbound
-        peers must be in distinct network groups), at most MAX_OUTBOUND_FULL_RELAY."""
+        peers must be in distinct network groups). Only up to MAX_OUTBOUND_FULL_RELAY /16s: with more, the node fills
+        its full-relay slots and then opens block-relay-only connections to seeds in the other /16s, which
+        check_first_contact() and wait_peers() do not model."""
         groups = set()
         for seed in seeds:
             host = seed.rsplit(":", 1)[0]
             assert re.fullmatch(r"\d+\.\d+\.\d+\.\d+", host), f"{seed}: this test groups IPv4 seeds only"
             groups.add(tuple(host.split(".")[:2]))
-        return min(len(groups), MAX_OUTBOUND_FULL_RELAY)
+        assert len(groups) <= MAX_OUTBOUND_FULL_RELAY, \
+            f"fixed seeds span {len(groups)} IPv4 /16s; this test handles up to {MAX_OUTBOUND_FULL_RELAY}"
+        return len(groups)
 
     def wait_peers(self, node, count, transport):
         """Wait until `node` has `count` peers whose version messages it has received, check that each is on
