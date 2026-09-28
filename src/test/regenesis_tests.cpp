@@ -1543,21 +1543,54 @@ BOOST_AUTO_TEST_CASE(testnet_a_rules_are_mainnet_rules)
     BOOST_CHECK_EQUAL(MAX_BLOCK_DATACARRIER_BYTES, 8'000U); // 100 anchors of 80 bytes (35c4fda)
 }
 
-// The v1 genesis standing in for mainnet carries a zero-value witness v2 marker
-// output that the v3-only rule would refuse; only the genesis exemption in
-// CheckBlock saves it. (The carried-as-v3 rehearsal that used to live here went
-// with the carry itself, 35c4fda: no chain carries anything in any more.)
+// Genesis blocks and the v3-only output rule. Mainnet has stood on its final
+// charter genesis since 7ba962a (2026-09-26, 3bc1a36d...79f2): its coinbase's only
+// output is the zero-value OP_RETURN charter commitment, with no witness v2
+// marker, so it passes the v3-only rule without the genesis exemption. Testnet A
+// still stands on the v1 placeholder genesis (TESTNET_GENESIS_IS_FINAL = false),
+// whose zero-value witness v2 marker output the v3-only rule would refuse; only
+// the genesis exemption in CheckBlock, keyed to the chain's own genesis hash,
+// saves it. (The carried-as-v3 rehearsal that used to live here went with the
+// carry itself, 35c4fda: no chain carries anything in any more.)
 BOOST_AUTO_TEST_CASE(placeholder_genesis_marker_output_exempt)
 {
     const auto main{CreateChainParams(*m_node.args, ChainType::MAIN)};
     const CBlock& main_genesis{main->GenesisBlock()};
-    BOOST_REQUIRE(!main_genesis.vtx[0]->vout.empty());
-    BOOST_CHECK(main_genesis.vtx[0]->vout[0].scriptPubKey.size() == 34 && main_genesis.vtx[0]->vout[0].scriptPubKey[0] == OP_2);
+    BOOST_REQUIRE(main->GenesisIsFinal());
+    BOOST_CHECK_EQUAL(main_genesis.GetHash().GetHex(), "3bc1a36df7d786a5c4584e21d248e0a3785a96aaa60a5b3959dfad50283379f2");
+    BOOST_CHECK(main_genesis.GetHash() != Consensus::V1_GENESIS_HASH);
+    BOOST_REQUIRE_EQUAL(main_genesis.vtx.size(), 1U);
+    const CTransaction& main_cb{*main_genesis.vtx[0]};
+    BOOST_REQUIRE_EQUAL(main_cb.vout.size(), 1U);
+    BOOST_CHECK_EQUAL(main_cb.vout[0].nValue, 0);
+    BOOST_CHECK(main_cb.vout[0].scriptPubKey == charter::CommitmentScript()); // OP_RETURN <"XCOIN/charter/1" || CHARTER_HASH>
+    BOOST_CHECK(charter::HasCommitment(main_cb));
+    BlockValidationState main_state;
+    BOOST_CHECK(CheckBlock(main_genesis, main_state, main->GetConsensus(), /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    TxValidationState main_tx_state;
+    BOOST_CHECK(CheckTransaction(main_cb, main_tx_state, /*permit_v2_outputs=*/false)); // no exemption needed
+
+    const auto testnet{CreateChainParams(*m_node.args, ChainType::TESTNET)};
+    if (testnet->GenesisIsFinal()) {
+        // Re-mined: testnet A's genesis then has mainnet's form, with no marker to exempt.
+        BOOST_CHECK(charter::HasCommitment(*testnet->GenesisBlock().vtx[0]));
+        return;
+    }
+    const CBlock& placeholder{testnet->GenesisBlock()};
+    BOOST_CHECK_EQUAL(placeholder.GetHash(), Consensus::V1_GENESIS_HASH);
+    BOOST_CHECK(!testnet->GetConsensus().permitV2Outputs);
+    BOOST_REQUIRE(!placeholder.vtx[0]->vout.empty());
+    BOOST_CHECK(placeholder.vtx[0]->vout[0].scriptPubKey.size() == 34 && placeholder.vtx[0]->vout[0].scriptPubKey[0] == OP_2);
+    BOOST_CHECK_EQUAL(placeholder.vtx[0]->vout[0].nValue, 0);
     BlockValidationState genesis_state;
-    BOOST_CHECK(CheckBlock(main_genesis, genesis_state, main->GetConsensus(), /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK(CheckBlock(placeholder, genesis_state, testnet->GetConsensus(), /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
     TxValidationState tx_state;
-    BOOST_CHECK(!CheckTransaction(*main_genesis.vtx[0], tx_state, /*permit_v2_outputs=*/false)); // only the genesis exemption saves it
+    BOOST_CHECK(!CheckTransaction(*placeholder.vtx[0], tx_state, /*permit_v2_outputs=*/false)); // only the genesis exemption saves it
     BOOST_CHECK_EQUAL(tx_state.GetRejectReason(), "bad-txout-not-pq");
+    // The exemption belongs to the chain's own genesis: under mainnet's rules the same block is refused.
+    BlockValidationState foreign_state;
+    BOOST_CHECK(!CheckBlock(placeholder, foreign_state, main->GetConsensus(), /*fCheckPOW=*/false, /*fCheckMerkleRoot=*/true));
+    BOOST_CHECK_EQUAL(foreign_state.GetRejectReason(), "bad-txout-not-pq");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
