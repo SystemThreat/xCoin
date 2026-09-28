@@ -194,3 +194,20 @@ code when the pool is down.
 ## The address prefix is checked against the node
 
 The pool reads `getblockchaininfo` at startup and refuses to run when `XCOIN_ADDRESS_HRP` contradicts the chain the node reports (main uses `xpa`, the rehearsal chain `txa`, regtest `nxrt`). A witness v2 payout is legal only on regtest, so a wrong prefix could otherwise have the pool paying an output type the chain rejects.
+
+## PPLNS mode (paid in the coinbase)
+
+`XCOIN_POOL_MODE=pplns` turns the pool into a PPLNS pool that never holds coins:
+every block's coinbase pays the miners of the last N shares directly, pro rata by
+credited difficulty, plus one pool-fee output. N is `XCOIN_PPLNS_FACTOR` (default 8)
+times the network difficulty. Amounts are whole satoshis (floored; leftover dust goes
+to the largest miner) and always sum to `coinbasevalue`. Miners whose part would be
+under `XCOIN_PPLNS_MIN_OUT_SATS` (10,000) get no output that block (their part goes to
+the others; their shares stay in the window), and at most `XCOIN_PPLNS_MAX_OUTPUTS`
+(40) miners are paid per block. The window persists in `<STATS_DIR>/pplns_window.json`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `XCOIN_POOL_MODE` | `solo` | `solo` or `pplns` |
+| `XCOIN_POOL_FEE_BP` | `299` | pool fee in basis points (2.99%) |
+| `XCOIN_POOL_FEE_ADDRESS` | — | required in pplns mode with a fee; an `xpa1r…` address |

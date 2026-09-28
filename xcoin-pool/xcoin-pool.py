@@ -20,9 +20,16 @@ chain has no witness v2 output at all (a v2 payout would be rejected as
 bad-txout-not-pq).
 
 The pool talks to a local xCoin node via JSON-RPC (getblocktemplate / submitblock).
+
+THE OWN-NODE RULE (hard, testnet and mainnet alike): a pool must stand on its
+own full node. The RPC endpoint must be loopback — the node runs on the same
+machine as the pool — and the pool refuses to start otherwise. Every pool is
+then one more independent verifier; no pool can free-ride on somebody else's
+node. This is what keeps pool growth organic.
+
 Config is entirely environment-driven — no hardcoded hosts or credentials:
 
-    XCOIN_RPC_HOST      (default 127.0.0.1)
+    XCOIN_RPC_HOST      (default 127.0.0.1; loopback REQUIRED — see the own-node rule)
     XCOIN_RPC_PORT      (default 8332, mainnet's per src/chainparamsbase.cpp; the rehearsal chain's is 19432)
     XCOIN_RPC_COOKIE    (preferred) path of the cookie file nexd writes on every start:
                          <datadir>/<chain>/.cookie, mode 600. No password exists anywhere.
@@ -65,7 +72,24 @@ CFG = {
     # Block links in Discord notifications. Same variable the explorer reads,
     # so a rebrand or a private explorer only has to be set in one place.
     "explorer_url": os.environ.get("XCOIN_EXPLORER_URL", "https://superknet.com").rstrip("/"),
+    # Payout mode. "solo" (default): the finder's coinbase pays the finder everything.
+    # "pplns": every block's coinbase pays the miners of the last N shares directly,
+    # in proportion to their work, plus the pool fee — the pool never holds coins.
+    "mode": os.environ.get("XCOIN_POOL_MODE", "solo").strip().lower(),
+    "fee_bp": int(os.environ.get("XCOIN_POOL_FEE_BP", "299")),          # 2.99%
+    "fee_address": os.environ.get("XCOIN_POOL_FEE_ADDRESS", "").strip(),
+    # window = factor x network difficulty, in credited share difficulty
+    "pplns_factor": float(os.environ.get("XCOIN_PPLNS_FACTOR", "8")),
+    "pplns_min_out": int(os.environ.get("XCOIN_PPLNS_MIN_OUT_SATS", "10000")),   # 0.0001 XID
+    "pplns_max_outputs": int(os.environ.get("XCOIN_PPLNS_MAX_OUTPUTS", "40")),
+    # Miner slots: authorized connections served at once (0 = no cap). A full pool
+    # turns a new miner away at mining.authorize and points it at the directory.
+    "max_miners": int(os.environ.get("XCOIN_POOL_MAX_MINERS", "0")),
+    # Directory facts published in pool_stats.json for the explorer and xcoinpool.com.
+    "region": os.environ.get("XCOIN_POOL_REGION", "").strip(),
+    "public_stratum": os.environ.get("XCOIN_POOL_PUBLIC_STRATUM", "").strip(),
 }
+POOL_DIRECTORY_URL = "https://xcoinpool.com"
 
 # There is NO premine and NO founder output: every block from height 1 pays
 # coinbasevalue (subsidy + fees) to the miner.
@@ -433,15 +457,37 @@ def save_stats():
             "blocks": r.get("blocks", 0), "shares": r.get("shares", 0),
             "since": r.get("first", 0), "last": r.get("last", 0),
             "hashrate_mhs": round(rate_hps(r) / 1e6, 2),
+            "hashrate_hps": round(rate_hps(r), 1),   # unrounded-in-MH figure for slow (browser) rigs
             "bandwidth_gbs": round(rate_hps(r) * 8192.0 / 1e9, 2),
             # self-reported by the miner (mining.hashrate), unverified; null when stale
             "reported_hashrate_mhs": None if self_rep is None else round(self_rep / 1e6, 2),
         }
     leaderboard = [entry(r) for r in lb]
     stats = {"updated": now, "active_miners": len(active), "total_miners": len(RIGS),
+             # true cumulative over EVERY rig, not just the 50 published rows — the
+             # explorer's "Pool shares · cumulative" reads this (audit: the summed
+             # leaderboard silently excluded rigs below the cut)
+             "total_shares": sum(r.get("shares", 0) for r in RIGS.values()),
+             # distinct payout addresses: RIGS is keyed per session, so total_miners
+             # counts sessions; this is the honest miner-population figure
+             "total_addresses": len({r.get("address") for r in RIGS.values() if r.get("address")}),
              "share_diff": CFG["start_diff"], "hashrate_hps": net_hps,
              "reported_hashrate_hps": net_reported_hps,   # sum of unverified self-reports, display only
-             "leaderboard": leaderboard}
+             "leaderboard": leaderboard,
+             "mode": CFG["mode"],
+             # miner slots: open authorized sessions against the cap (null = no cap)
+             "connected_miners": connected_miners(), "max_miners": CFG["max_miners"] or None,
+             "full": pool_full(),
+             "region": CFG["region"] or None, "stratum": CFG["public_stratum"] or None}
+    if CFG["mode"] == "pplns":
+        w = PPLNS.weights(); tot = sum(w.values()) or 1.0
+        stats["pool_fee_bp"] = CFG["fee_bp"]
+        stats["pplns"] = {"window_diff": round(PPLNS.total, 6), "shares": len(PPLNS.shares),
+                          "factor": CFG["pplns_factor"],
+                          "split": sorted(({"script": k.hex(), "pct": round(100 * v / tot, 4)} for k, v in w.items()),
+                                          key=lambda x: -x["pct"])[:100]}
+        try: PPLNS.save()
+        except Exception as e: log.error("save pplns: %s", e)
     try:
         tmp = STATS_FILE + ".tmp"
         with open(tmp, "w") as f: json.dump(stats, f)
@@ -704,8 +750,14 @@ def build_coinbase(height, reward_sats, en_size, wc_hex, payout_spk):
     part1 = (1).to_bytes(4,"little") + varint(1) + b"\x00"*32 + b"\xff\xff\xff\xff" + varint(ss_len) + pre
 
     outs = b""; nout = 0
-    spk = check_payout_spk(payout_spk)
-    outs += reward_sats.to_bytes(8,"little") + varint(len(spk)) + spk; nout += 1
+    # payout_spk is one script (solo: it takes the whole reward) or a PPLNS list
+    # of (script, sats) that must add up to exactly reward_sats.
+    payouts = [(payout_spk, reward_sats)] if isinstance(payout_spk, (bytes, bytearray)) else list(payout_spk)
+    if sum(a for _, a in payouts) != reward_sats or any(a <= 0 for _, a in payouts):
+        raise ValueError("coinbase payouts must be positive and sum to coinbasevalue")
+    for spk, amount in payouts:
+        spk = check_payout_spk(spk)
+        outs += int(amount).to_bytes(8,"little") + varint(len(spk)) + spk; nout += 1
     if True:
         if wc_hex:
             wc = bytes.fromhex(wc_hex)
@@ -717,6 +769,77 @@ def build_coinbase(height, reward_sats, en_size, wc_hex, payout_spk):
             outs += (0).to_bytes(8,"little") + varint(len(wc)) + wc; nout += 1
     part2 = b"\xff\xff\xff\xff" + varint(nout) + outs + (0).to_bytes(4,"little")
     return part1, part2
+
+def pplns_split(reward_sats, weights, fee_bp, fee_spk, min_out, max_outputs, fallback_spk):
+    """Split one coinbase value: the pool fee, then the miners' part pro rata by
+    PPLNS weight. ``weights`` maps payout scriptPubKey -> credited difficulty in the
+    window. Integer satoshis only; each miner is floored, and the few leftover
+    satoshis go to the largest contributor, so the outputs always sum to exactly
+    ``reward_sats``. Miners whose floor would be under ``min_out`` get no output this
+    block (their part goes to the rest; their shares stay in the window), and only
+    the ``max_outputs`` largest are paid, keeping the coinbase small. With an empty
+    window the miners' part goes to ``fallback_spk`` (the session's own address)."""
+    if not 0 <= fee_bp < 10_000:
+        raise ValueError("pool fee must be 0..9999 basis points")
+    fee = reward_sats * fee_bp // 10_000 if fee_spk else 0
+    pool = reward_sats - fee
+    ranked = sorted(((w, spk) for spk, w in weights.items() if w > 0), key=lambda x: (-x[0], x[1]))
+    ranked = ranked[:max(1, max_outputs)]
+    while ranked:
+        total = sum(w for w, _ in ranked)
+        amounts = [(spk, int(pool * w / total)) for w, spk in ranked]
+        if all(a >= min_out for _, a in amounts) or len(ranked) == 1:
+            break
+        ranked = [(w, spk) for (w, spk), (_, a) in zip(ranked, amounts) if a >= min_out] or ranked[:1]
+    if not ranked:
+        amounts = [(fallback_spk, pool)]
+    amounts = [list(x) for x in amounts]
+    amounts[0][1] += pool - sum(a for _, a in amounts)       # rounding dust to the largest
+    outs = [(check_payout_spk(spk), a) for spk, a in amounts if a > 0]
+    if fee:
+        outs.append((check_payout_spk(fee_spk), fee))
+    assert sum(a for _, a in outs) == reward_sats
+    return outs
+
+class PplnsWindow:
+    """The last N shares, by credited difficulty: N = factor x network difficulty.
+    Persisted so a restart does not forget who is owed the next block."""
+    def __init__(self, path, factor):
+        self.path, self.factor = path, factor
+        self.shares = []          # [spk_hex, diff]
+        self.total = 0.0
+        self.dirty = False
+
+    def add(self, spk, diff, net_diff):
+        self.shares.append([spk.hex(), float(diff)]); self.total += float(diff)
+        limit = self.factor * max(net_diff, 1e-12)
+        drop = 0
+        while self.total - self.shares[drop][1] >= limit and drop < len(self.shares) - 1:
+            self.total -= self.shares[drop][1]; drop += 1
+        if drop: del self.shares[:drop]
+        self.dirty = True
+
+    def weights(self):
+        w = {}
+        for spk, d in self.shares:
+            k = bytes.fromhex(spk); w[k] = w.get(k, 0.0) + d
+        return w
+
+    def load(self):
+        try:
+            with open(self.path) as f: self.shares = [[s, float(d)] for s, d in json.load(f)]
+            self.total = sum(d for _, d in self.shares)
+        except FileNotFoundError: pass
+        except Exception as e: log.error("pplns window load: %s", e)
+
+    def save(self):
+        if not self.dirty: return
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f: json.dump(self.shares, f)
+        os.replace(tmp, self.path); self.dirty = False
+
+PPLNS = PplnsWindow(os.path.join(STATS_DIR, "pplns_window.json"), CFG["pplns_factor"])
+FEE_SPK = None   # set at startup in pplns mode
 
 def merkle_branch(tx_hashes_le):
     """Sibling hashes for the coinbase (index 0)."""
@@ -774,6 +897,14 @@ class Jobs:
 
 JOBS = Jobs()
 SESSIONS = set()
+
+def connected_miners(exclude=None):
+    """Authorized stratum sessions right now: what the miner-slot cap counts."""
+    return sum(1 for s in SESSIONS if s.spk is not None and s is not exclude)
+
+def pool_full(exclude=None):
+    cap = CFG["max_miners"]
+    return cap > 0 and connected_miners(exclude) >= cap
 
 # ── stratum session ──────────────────────────────────────────────────────────
 MAX_AGENT_LEN = 120
@@ -845,8 +976,12 @@ class Session:
             return
         reward = t["coinbasevalue"]
         # scriptSig extranonce slot must fit extranonce1 (from subscribe) + extranonce2.
+        payouts = self.spk
+        if CFG["mode"] == "pplns":
+            payouts = pplns_split(int(reward), PPLNS.weights(), CFG["fee_bp"], FEE_SPK,
+                                  CFG["pplns_min_out"], CFG["pplns_max_outputs"], self.spk)
         p1, p2 = build_coinbase(t["height"], reward, len(self.en1) + self.en2_size,
-                                t.get("default_witness_commitment"), self.spk)
+                                t.get("default_witness_commitment"), payouts)
         self.jobn += 1
         jid = f"{self.jobn:x}"
         prev_le = bytes.fromhex(t["previousblockhash"])[::-1]
@@ -1059,6 +1194,17 @@ class Session:
             self.connected_at = time.time()
             await self.send({"id": mid, "result": [[["mining.notify", "xcoin"]], self.en1.hex(), self.en2_size], "error": None})
         elif method == "mining.authorize":
+            # Checked before anything is assigned (a browser session number included), with
+            # no await until spk is set, so two authorizes can never both take the last slot.
+            if pool_full(exclude=self):
+                cap = CFG["max_miners"]
+                why = f"pool full: all {cap} miner slots are taken. Pick another xCoin pool at {POOL_DIRECTORY_URL}"
+                log.warning("miner refused: %s -> %s", self.peer, why)
+                await self.send({"id": mid, "result": False, "error": [24, why, None]})
+                await self.send({"id": None, "method": "client.show_message", "params": [why]})
+                try: self.w.close()
+                except Exception: pass
+                return
             user = params[0] if params else ""
             addr = user.split(".")[0]
             # worker NAME = the part after the dot ("xpa1r….rig1" -> "rig1")
@@ -1113,6 +1259,8 @@ class Session:
                 j = self.jobs[jid]
                 credit = credited_diff(j["share_diff"], j["target"])   # what the miner had to meet
                 record_share(getattr(self, "address", "?"), credit)     # persistent stats
+                if CFG["mode"] == "pplns" and self.spk is not None:
+                    PPLNS.add(self.spk, credit, target_to_diff(j["target"]))
                 record_rig_share(getattr(self, "address", "?"), self.worker, credit)
                 await self.observe_share(credit)
                 if is_block:
@@ -1248,9 +1396,19 @@ async def main():
         )
     log.info("address HRP %s confirmed against the node's chain %s", expected, node_chain)
     load_miners()
+    global FEE_SPK
+    if CFG["mode"] not in ("solo", "pplns"):
+        raise SystemExit(f"XCOIN_POOL_MODE must be solo or pplns, not {CFG['mode']!r}")
+    if CFG["mode"] == "pplns":
+        if not CFG["fee_address"] and CFG["fee_bp"]:
+            raise SystemExit("pplns mode with a pool fee needs XCOIN_POOL_FEE_ADDRESS; refusing to start.")
+        FEE_SPK = payout_script(CFG["fee_address"]) if CFG["fee_bp"] else None
+        PPLNS.load()
+        log.info("PPLNS: window %sx network difficulty, fee %.2f%% to %s, %d shares loaded",
+                 CFG["pplns_factor"], CFG["fee_bp"] / 100, CFG["fee_address"] or "-", len(PPLNS.shares))
     JOBS.refresh()
     srv = await asyncio.start_server(lambda r, w: Session(r, w).handle(), CFG["stratum_host"], CFG["stratum_port"])
-    log.info("xcoin-pool stratum listening on %s:%s (solo)", CFG["stratum_host"], CFG["stratum_port"])
+    log.info("xcoin-pool stratum listening on %s:%s (%s)", CFG["stratum_host"], CFG["stratum_port"], CFG["mode"])
     asyncio.create_task(poll_loop())
     asyncio.create_task(stats_loop())
     asyncio.create_task(natpmp_loop())

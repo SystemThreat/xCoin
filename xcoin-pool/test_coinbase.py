@@ -1034,5 +1034,78 @@ class RpcCredentialTests(unittest.TestCase):
         self.assertEqual(POOL._rpc_credentials(), "u:p")
 
 
+class PplnsTests(unittest.TestCase):
+    """PPLNS paid in the coinbase: fee + pro-rata miner outputs, exact to the satoshi."""
+    A = bytes([0x53, 0x20]) + b"\x0a" * 32
+    B = bytes([0x53, 0x20]) + b"\x0b" * 32
+    C = bytes([0x53, 0x20]) + b"\x0c" * 32
+    FEE = bytes([0x53, 0x20]) + b"\xfe" * 32
+
+    def split(self, reward, weights, fee_bp=299, min_out=10_000, max_outputs=40, fallback=None):
+        return POOL.pplns_split(reward, weights, fee_bp, self.FEE, min_out, max_outputs, fallback or self.C)
+
+    def test_fee_and_pro_rata_sum_exactly(self):
+        outs = dict(self.split(STUB_COINBASE_VALUE, {self.A: 3.0, self.B: 1.0}))
+        fee = STUB_COINBASE_VALUE * 299 // 10_000
+        self.assertEqual(outs[self.FEE], fee)
+        self.assertEqual(sum(outs.values()), STUB_COINBASE_VALUE)
+        miners = STUB_COINBASE_VALUE - fee
+        self.assertEqual(outs[self.B], miners // 4)
+        self.assertEqual(outs[self.A], miners - miners // 4)
+
+    def test_rounding_dust_goes_to_largest(self):
+        outs = dict(self.split(10_000_007, {self.A: 1.0, self.B: 1.0, self.C: 1.0}, fee_bp=0, min_out=1))
+        self.assertEqual(sum(outs.values()), 10_000_007)
+
+        self.assertLessEqual(max(outs.values()) - min(outs.values()), 3)
+
+    def test_sub_minimum_miner_is_folded_into_the_rest(self):
+        outs = dict(self.split(COIN, {self.A: 1_000_000.0, self.B: 1.0}))
+        self.assertNotIn(self.B, outs)
+        self.assertEqual(sum(outs.values()), COIN)
+
+    def test_max_outputs_caps_the_coinbase(self):
+        w = {bytes([0x53, 0x20]) + i.to_bytes(32, "big"): float(100 - i) for i in range(60)}
+        outs = self.split(50 * COIN, w, max_outputs=40)
+        self.assertEqual(len(outs), 41)      # 40 miners + the fee
+        self.assertEqual(sum(a for _, a in outs), 50 * COIN)
+
+    def test_empty_window_pays_the_session(self):
+        outs = dict(self.split(COIN, {}))
+        self.assertEqual(outs[self.C], COIN - COIN * 299 // 10_000)
+
+    def test_zero_fee_has_no_fee_output(self):
+        outs = POOL.pplns_split(COIN, {self.A: 1.0}, 0, None, 1, 40, self.C)
+        self.assertEqual(outs, [(self.A, COIN)])
+
+    def test_coinbase_carries_every_output_then_the_commitment(self):
+        payouts = self.split(STUB_COINBASE_VALUE, {self.A: 2.0, self.B: 1.0})
+        outputs = parse_outputs(build(5000, STUB_COINBASE_VALUE, payouts))
+        self.assertEqual([(v, s) for v, s in outputs[:-1]], [(a, s) for s, a in payouts])
+        self.assertEqual(outputs[-1][0], 0)
+        self.assertEqual(outputs[-1][1].hex(), WITNESS_COMMITMENT)
+
+    def test_payouts_that_do_not_sum_are_refused(self):
+        with self.assertRaises(ValueError):
+            build(1, COIN, [(self.A, COIN - 1)])
+
+    def test_v2_output_in_split_is_refused(self):
+        v2 = bytes([0x52, 0x20]) + b"\x0a" * 32
+        with self.assertRaises(ValueError):
+            self.split(COIN, {v2: 1.0})
+
+    def test_window_slides_by_network_difficulty(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            w = POOL.PplnsWindow(os.path.join(d, "w.json"), factor=2)
+            for _ in range(10): w.add(self.A, 1.0, net_diff=3.0)   # window = 6
+            for _ in range(3): w.add(self.B, 1.0, net_diff=3.0)
+            self.assertAlmostEqual(w.total, 6.0)
+            self.assertEqual(w.weights(), {self.A: 3.0, self.B: 3.0})
+            w.dirty = True; w.save()
+            w2 = POOL.PplnsWindow(w.path, 2); w2.load()
+            self.assertEqual(w2.weights(), w.weights())
+
+
 if __name__ == "__main__":
     unittest.main()
