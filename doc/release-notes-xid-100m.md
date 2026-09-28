@@ -1,7 +1,9 @@
-XID, a 100,000,000 XID cap, and mainnet on November 1, 2026 (branch `xid-100m`)
+XID, a 100,000,000 XID cap, and the mainnet genesis of 2026-09-26 (NEX 31.99.0)
 ===============================================================================
 
-Owner decisions of 2026-09-25. Nothing here is released yet.
+Owner decisions of 2026-09-25, released in NEX 31.99.0 (tag
+`mainnet-genesis-2026-09-26`), the release mainnet launched with on 2026-09-26. What
+came after is in `release-notes-31.99.1.md`.
 
 Currency
 --------
@@ -19,9 +21,10 @@ Currency
   `consensus/params.h` is generated from `contrib/regenesis/emission-policy.json` by
   `contrib/regenesis/emission.py`; `contrib/regenesis/EMISSION-SHAPE-SPOTS.md` lists every
   place that states the shape.
-- Mainnet launches on **November 1, 2026**, moved from September 30, 2026 so that
-  node-to-node connections get hybrid post-quantum encryption first (ML-KEM-768 layered
-  on BIP324, "HX1", draft XIP-4).
+- The mainnet genesis was mined at **2026-09-26 00:00:00 UTC** (hash `3bc1a36d…79f2`),
+  with hybrid post-quantum node encryption (ML-KEM-768 layered on BIP324, "HX1", XIP-4)
+  already in the node. The November 1, 2026 date announced earlier, itself moved from
+  September 30, 2026, no longer applies.
 
 Genesis safety
 --------------

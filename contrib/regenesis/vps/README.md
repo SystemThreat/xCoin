@@ -1,4 +1,13 @@
-# Node 2 on a VPS (testnet A)
+# Node 2 on a VPS (testnet A, retired)
+
+> **History, not instructions.** These scripts set up a testnet A node and its pool.
+> Testnet A is retired, and none of this sets up a mainnet node: `deploy.sh` and
+> `bootstrap.sh` stop before shipping or changing anything ("REFUSING:
+> TESTNET_GENESIS_IS_FINAL is not true"), `nexd -testnet` refuses to start, and
+> `pool-deploy.sh` / `pool-install.sh` configure a pool for testnet A (RPC 19432, `txa`
+> addresses, `xcoin-testneta.service`). For a mainnet node on a VPS, follow
+> [A node on a VPS](../../../README.md#a-node-on-a-vps) in the top-level README. The rest
+> of this page is kept as the record of the rehearsal.
 
 One fresh Ubuntu 24.04 machine, hardened, building the reviewed commit and running
 `nexd -testnet` as an unprivileged service. No secret is ever placed on the VPS: RPC
