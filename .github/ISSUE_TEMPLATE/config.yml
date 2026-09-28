@@ -1,8 +1,5 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Bitcoin Core Security Policy
-    url: https://github.com/bitcoin/bitcoin/blob/master/SECURITY.md
-    about: View security policy
-  - name: Bitcoin Core Developers
-    url: https://bitcoincore.org
-    about: Bitcoin Core homepage
+  - name: Security problem? Read SECURITY.md before you open anything
+    url: https://github.com/SystemThreat/xCoin/blob/main/SECURITY.md
+    about: A way to mint, to spend without the owner's signature, to split the chain or to crash a node goes through xCoin's SECURITY.md, with no details in a public issue, and never to Bitcoin Core.
