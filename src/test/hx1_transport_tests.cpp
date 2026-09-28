@@ -1531,6 +1531,62 @@ BOOST_FIXTURE_TEST_CASE(require_mode_any_address, HX1ConnmanSetup)
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(seed_addresses_use_v2, HX1ConnmanSetup)
+{
+    // DNS seed and fixed seed addresses are stored as NODE_P2P_V2, so a new node's first automatic connection to
+    // a seed is v2 (HX1 under prefer mode) in every mode, not plaintext v1. The DNS query still asks for "x9.".
+    static_assert(SeedsServiceFlags() == ServiceFlags{NODE_NETWORK | NODE_WITNESS});
+    static_assert(SeedAddressServiceFlags() == ServiceFlags{NODE_NETWORK | NODE_WITNESS | NODE_P2P_V2});
+    const auto main_params{CreateChainParams(*m_node.args, ChainType::MAIN)};
+    const std::vector<CAddress> seeds{ConvertSeeds(main_params->FixedSeeds())};
+    BOOST_REQUIRE(!seeds.empty());
+    for (const CAddress& seed : seeds) {
+        BOOST_CHECK_EQUAL(seed.nServices, SeedAddressServiceFlags());
+        BOOST_CHECK_EQUAL(seed.GetPort(), main_params->GetDefaultPort());
+    }
+    for (const auto mode : {V2HybridMode::OFF, V2HybridMode::PREFER, V2HybridMode::REQUIRE}) {
+        m_connman->SetV2HybridMode(mode);
+        BOOST_CHECK(m_connman->UseV2TransportTo(SeedAddressServiceFlags()));
+        // The services seeds carried before: only require mode tried v2.
+        BOOST_CHECK_EQUAL(m_connman->UseV2TransportTo(SeedsServiceFlags()), mode == V2HybridMode::REQUIRE);
+        // -v2transport=0: v1, as before.
+        m_connman->RemoveLocalServices(NODE_P2P_V2);
+        BOOST_CHECK(!m_connman->UseV2TransportTo(SeedAddressServiceFlags()));
+        m_connman->AddLocalServices(NODE_P2P_V2);
+    }
+
+    // Prefer mode: open a connection to a seed-tagged address the way ThreadOpenConnections does. It is v2: the node
+    // sends its ElligatorSwift key first. A v1-only seed drops that key without a byte back; the node reconnects with
+    // v1, so a seed that does not speak v2 is not stranded.
+    m_connman->SetV2HybridMode(V2HybridMode::PREFER);
+    const CAddress seed{LookupNumeric(Dest(14), Params().GetDefaultPort()), SeedAddressServiceFlags()};
+    BOOST_REQUIRE(m_connman->OpenNetworkConnection(seed, false, {}, /*pszDest=*/nullptr, ConnectionType::OUTBOUND_FULL_RELAY,
+                                                   m_connman->UseV2TransportTo(seed.nServices)));
+    auto pipes{m_pipes.back()};
+    BOOST_CHECK(m_connman->TestNodes().back()->m_transport->GetInfo().transport_type == TransportProtocolType::DETECTING);
+    Step();
+    BOOST_CHECK_GE(Drain(pipes->send).size(), EllSwiftPubKey::size());
+    pipes->recv.Eof();
+    Step();
+    m_connman->DisconnectNodesPublic();
+    const auto queued{m_connman->QueuedReconnections()};
+    BOOST_REQUIRE_EQUAL(queued.size(), 1U);
+    BOOST_CHECK(!queued[0].use_v2transport);
+    BOOST_CHECK_EQUAL(queued[0].destination, seed.ToStringAddrPort());
+    m_connman->PerformReconnectionsPublic();
+    BOOST_REQUIRE_EQUAL(m_connman->TestNodes().size(), 1U);
+    BOOST_CHECK(m_connman->TestNodes().back()->m_transport->GetInfo().transport_type == TransportProtocolType::V1);
+    m_connman->ClearTestNodes();
+
+    // -v2transport=0: the first connection to the same seed-tagged address is v1.
+    m_connman->RemoveLocalServices(NODE_P2P_V2);
+    BOOST_REQUIRE(m_connman->OpenNetworkConnection(seed, false, {}, /*pszDest=*/nullptr, ConnectionType::OUTBOUND_FULL_RELAY,
+                                                   m_connman->UseV2TransportTo(seed.nServices)));
+    BOOST_CHECK(m_connman->TestNodes().back()->m_transport->GetInfo().transport_type == TransportProtocolType::V1);
+    m_connman->ClearTestNodes();
+    m_connman->AddLocalServices(NODE_P2P_V2);
+}
+
 BOOST_FIXTURE_TEST_CASE(removenode_clears_retry_mark, HX1ConnmanSetup)
 {
     // A MANUAL destination removed with removenode forgets its classical retry: a later addnode tries HX1 again.

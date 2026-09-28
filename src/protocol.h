@@ -354,6 +354,17 @@ std::vector<std::string> serviceFlagsToStr(uint64_t flags);
 constexpr ServiceFlags SeedsServiceFlags() { return ServiceFlags(NODE_NETWORK | NODE_WITNESS); }
 
 /**
+ * Services assumed for an address from a DNS seed or the fixed seeds, until a
+ * connection to it reports the real ones. xCoin adds NODE_P2P_V2 because every
+ * node on this chain speaks v2, so the first connection to a seed is v2 (HX1
+ * under -v2hybrid=1) rather than plaintext v1. A seed that turns out not to
+ * speak v2 is retried over v1 as before (V2Transport::ShouldReconnectV1), the
+ * version handshake then stores its real services, and -v2transport=0 still
+ * connects over v1. The DNS seed query keeps SeedsServiceFlags() ("x9.").
+ */
+constexpr ServiceFlags SeedAddressServiceFlags() { return ServiceFlags(SeedsServiceFlags() | NODE_P2P_V2); }
+
+/**
  * Checks if a peer with the given service flags may be capable of having a
  * robust address-storage DB.
  */

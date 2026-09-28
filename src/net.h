@@ -205,6 +205,9 @@ bool SeenLocal(const CService& addr);
 bool IsLocal(const CService& addr);
 CService GetLocalAddress(const CNode& peer);
 
+/** Convert serialized fixed seeds (BIP155) into addresses with SeedAddressServiceFlags(). Exposed for tests. */
+std::vector<CAddress> ConvertSeeds(const std::vector<uint8_t>& vSeedsIn);
+
 extern bool fDiscover;
 extern bool fListen;
 
