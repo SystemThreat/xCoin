@@ -1,20 +1,50 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+This repository is xCoin (XID), a fork of Bitcoin Core. Report xCoin problems to xCoin.
+Bitcoin Core's security team, its security@bitcoincore.org address and its maintainers'
+keys have nothing to do with this project: do not send them xCoin reports.
 
-See our website for versions of Bitcoin Core that are currently supported with
-security updates: https://bitcoincore.org/en/lifecycle/#schedule
+## What to report privately
 
-## Reporting a Vulnerability
+Do not open a public issue, pull request or forum post for any of these:
 
-To report security issues send an email to security@bitcoincore.org (not for support).
+- a way to create coins outside the emission schedule, or to spend an output without
+  its owner's post-quantum signature;
+- a way to make two nodes of the current release disagree about which chain is valid
+  (a chain split);
+- a way to crash, stall or exhaust a node from the network, including through the HX1
+  (XIP-4) or BIP324 handshake;
+- a way to read, tamper with or downgrade an HX1 session without the peer noticing;
+- a way to extract a seed, key, passphrase or RPC cookie from the node wallet, the pool,
+  the explorer or the miner in this tree.
 
-The following keys may be used to communicate sensitive information to developers:
+Ordinary bugs, documentation errors and feature requests go to the public issue tracker.
 
-| Name | Fingerprint |
-|------|-------------|
-| Pieter Wuille | 133E AC17 9436 F14A 5CF1  B794 860F EB80 4E66 9320 |
-| Michael Ford | E777 299F C265 DD04 7930  70EB 944D 35F9 AC3D B76A |
-| Ava Chow | 1528 1230 0785 C964 44D3  334D 1756 5732 E08E 5E41 |
+## How to report
 
-You can import a key by running the following command with that individual’s fingerprint: `gpg --keyserver hkps://keys.openpgp.org --recv-keys "<fingerprint>"` Ensure that you put quotes around fingerprints containing spaces.
+> **TODO (founder):** no private channel is published yet. GitHub private vulnerability
+> reporting is off for this repository, and there is no security@ address on an xCoin
+> domain. Turn on private vulnerability reporting (repository Settings → Security) or
+> publish a security address, then replace this block with it.
+
+Until that channel exists, open a public issue titled only "Security contact request",
+with no details in it, and wait for a private channel before you send anything.
+
+Include in the report:
+
+- the release or commit (`nexd -version`, or `subversion` in `nex-cli getnetworkinfo`);
+- the steps to reproduce, and what you expected instead;
+- what an attacker gains, and whether it is being exploited on mainnet today.
+
+Never include a seed, a passphrase or a cookie, yours or anyone else's.
+
+## Supported versions
+
+Fixes are made on `main` and ship in the next release. Mainnet runs 31.99.0 (tag
+`mainnet-genesis-2026-09-26`) and 31.99.1 side by side; they follow the same chain and
+connect to each other. Upgrade to the newest release to receive fixes.
+
+The standalone wallet ([SystemThreat/xcoin-wallet](https://github.com/SystemThreat/xcoin-wallet))
+and MMM ([SystemThreat/MMM](https://github.com/SystemThreat/MMM)) live in their own
+repositories. Until they publish their own policy, report their security problems
+through the channel above.
