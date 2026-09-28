@@ -375,10 +375,14 @@ public:
         // (172.96.186.49), Hong Kong (198.252.107.13), London (103.119.217.105),
         // Singapore (198.252.101.117) and Sao Paulo (54.20.130.14) — four
         // continents, so a DNS failure plus a machine or two down still leaves a
-        // way in. Keep nodes_main.txt to nodes that actually listen; regenerate
-        // this array and rebuild when the fleet changes. Bitcoin's inherited
-        // 2,059 mainnet seeds were removed here; they answer on port 8333 and
-        // would fail this chain's magic anyway.
+        // way in. Hong Kong and Singapore share one IPv4 /16 (198.252.0.0/16),
+        // and without asmap a node makes at most one automatic outbound
+        // connection per /16, so the five are four independent network groups;
+        // put the next fleet node in a /16 not listed here. Keep nodes_main.txt
+        // to nodes that actually listen; regenerate this array and rebuild
+        // when the fleet changes. Bitcoin's inherited 2,059 mainnet seeds were
+        // removed here; they answer on port 8333 and would fail this chain's
+        // magic anyway.
         vFixedSeeds = std::vector<uint8_t>(std::begin(chainparams_seed_main), std::end(chainparams_seed_main));
 
         fDefaultConsistencyChecks = false;
