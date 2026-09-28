@@ -9,7 +9,7 @@ Tools); the binary is `./NerdMiner`, and `MacMetalCLI` is a compatibility symlin
 challenge with your wallet's ML-DSA-65 key. No password exists anywhere. The miner never sees a key: it shells out
 to the xCoin wallet CLI, which does the unlock (a passphrase typed at the terminal or handed over a pipe with
 `--passphrase-fd`, or an NTAG 424 card tap; never an environment variable) and the signature. The identity (`xid1…`) is a forum handle derived from the same key as your addresses, not a payout address; coins
-cannot be sent to it. Payout addresses start `xpa1r` (`txa1r` on testnet A).
+cannot be sent to it. Payout addresses start `xpa1r`.
 
 ```
 NerdMiner login --index 101          # make a challenge, sign with the forum key, open a one-time login link
@@ -21,16 +21,17 @@ NerdMiner login <challenge-id>       # solve the challenge shown on minedifferen
 NerdMiner --version
 ```
 
-Mining: the testnet A rehearsal is running and the mainnet genesis is not mined yet, so mine with a testnet A
-address (`txa1r…`, witness v3 bech32m) against the rehearsal pool:
+Mining: mainnet is live (genesis 2026-09-26 00:00 UTC). Mine to a witness v3 `xpa1r…` address on a public pool:
 
 ```
-./NerdMiner txa1r... --pool 172.96.186.49:3335 --worker rehearsal1 [--mode solo|shared] [--base <unixtime>]
+./NerdMiner xpa1r... --pool pool.xcoinminer.com:3335 --base 1790380800 --worker <name>   # solo, New York
+./NerdMiner xpa1r... --pool 198.252.101.117:3336 --base 1790380800 --worker <name>       # PPLNS, Singapore, 2.99% fee
 ```
 
-`--base <unixtime>` overrides the MetalDAG epoch base time (the genesis time from the node's `getblock` of
-block 0); testnet A has it built in, mainnet will need it once its genesis is mined. An `xpa1r…` mainnet address
-is refused until then, and an `xid1…` identity is never a payout address.
+`--base 1790380800` is the mainnet genesis time (the `time` of block 0 in the node's `getblock`), from which the
+MetalDAG epochs count; this build does not carry it yet and refuses an `xpa1r…` address without it. `--mode shared`
+only appends `-shared` to the worker name; the pool you connect to decides how it pays. An `xid1…` identity is never
+a payout address, and testnet A (`txa1r…`) is retired.
 
 ### Companion stats server (for the "NerdMiner MD" browser extension)
 

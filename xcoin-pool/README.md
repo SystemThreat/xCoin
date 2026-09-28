@@ -1,10 +1,12 @@
 # xcoin-pool
 
-A minimal **solo** Stratum pool for xCoin (XID). Point a **MetalDAG-capable**
-Stratum miner such as NerdMiner at it: when one of your shares meets the network
-target you find a block and receive the full block reward at your own `xpa1r…`
-address (`txa1r…` on the rehearsal chain). Ordinary Bitcoin SHA-256d ASICs do not
-compute MetalDAG and cannot mine xCoin directly. No accounts, no pool fee.
+A minimal Stratum pool for xCoin (XID), **solo** by default. Point a
+**MetalDAG-capable** Stratum miner such as NerdMiner at it: when one of your shares
+meets the network target you find a block and receive the full block reward at your
+own `xpa1r…` address. Ordinary Bitcoin SHA-256d ASICs do not compute MetalDAG and
+cannot mine xCoin directly. No accounts; in solo mode no pool fee.
+`XCOIN_POOL_MODE=pplns` runs it as a PPLNS pool paid in the coinbase
+([below](#pplns-mode-paid-in-the-coinbase)).
 
 It's a thin bridge to a local xCoin node (getblocktemplate → build work →
 submitblock), standard library only.
@@ -18,7 +20,7 @@ Worker addresses are **bech32m witness version 3** (REGENESIS.md sections 3 and 
 the 32-byte program is a Merkle root over algorithm-tagged leaves and the coinbase
 pays `OP_3 <root>`.
 
-- Accepted: `xpa1r…` (mainnet), `txa1r…` (rehearsal), and on regtest `nxrt1r…`
+- Accepted: `xpa1r…` (mainnet), `txa1r…` (the retired testnet A), and on regtest `nxrt1r…`
   (plus `nxrt1z…`, since regtest still permits witness v2 outputs).
 - **Refused: `xpa1z…` / `txa1z…`.** There is no witness v2 output anywhere on
   these chains; paying one would be rejected as `bad-txout-not-pq`. The refusal
@@ -29,48 +31,40 @@ pays `OP_3 <root>`.
   (post-quantum script tree) addresses. Generate one in the node wallet (getnewaddress).
   ```
 
-## The rehearsal pool
+## The public pools
 
-The testnet A rehearsal pool runs this program unchanged: stratum on
-`172.96.186.49:3335`, paying `txa1r…` addresses, one node behind it (P2P 19333,
-RPC 19432), the node's cookie file for RPC and no secret anywhere. Point a
-NerdMiner at it with a `txa1r…` address from the node wallet
-(`nex-cli -testnet createwallet`, then `getnewaddress`):
+Two mainnet pools run this program unchanged, each on its own node, paying `xpa1r…`
+addresses in the coinbase and holding no coins:
+
+- solo, New York: `pool.xcoinminer.com:3335` (172.96.186.49), no fee; a block you find
+  pays you its whole coinbase;
+- PPLNS, Singapore: `198.252.101.117:3336`, 2.99% fee (`XCOIN_POOL_MODE=pplns`, below).
 
 ```bash
-./NerdMiner txa1r… --pool 172.96.186.49:3335 --worker <name>
+./NerdMiner xpa1r… --pool pool.xcoinminer.com:3335 --base 1790380800 --worker <name>
 ```
 
-The browser miner at xcoinminer.com reaches the same pool through the
-WebSocket bridge below. `contrib/regenesis/vps/pool-install.sh` is the exact
-service definition (`xcoin-pool.service` and `xcoin-ws-bridge.service`, both as
-an unprivileged user).
+The browser miner at xcoinminer.com reaches the solo pool through the WebSocket bridge
+below. Testnet A and its rehearsal pool are retired; `contrib/regenesis/vps/pool-install.sh`
+is kept only as history.
 
-## Run your own against the rehearsal chain
+## Run your own against mainnet
 
-With a node of your own on the rehearsal chain (`contrib/regenesis/TESTNET-A.md`,
-datadir `$HOME/.xcoin-rehearsal/node`), from your clone of this repository:
+With a synced mainnet node of your own on the same machine (the top-level README, "Run a
+mainnet node"), from your clone of this repository:
 
 ```bash
-cd $HOME/xCoin
-mkdir -p -m 700 $HOME/.xcoin-rehearsal/pool
-XCOIN_RPC_PORT=19432 \
-XCOIN_RPC_COOKIE=$HOME/.xcoin-rehearsal/node/testneta/.cookie \
-XCOIN_ADDRESS_HRP=txa \
-XCOIN_STRATUM_PORT=3335 \
+XCOIN_RPC_COOKIE="$HOME/.nex/.cookie" \
 XCOIN_NATPMP=0 \
-XCOIN_STATS_DIR=$HOME/.xcoin-rehearsal/pool \
+XCOIN_STATS_DIR="$HOME/.xcoin-pool" \
 python3 xcoin-pool/xcoin-pool.py
 ```
 
-Always set `XCOIN_STATS_DIR` for a rehearsal pool so its stats and webhook files never share a directory with another pool's.
-
-Then start a NerdMiner with a `txa1r…` address and `--pool 127.0.0.1:3335`.
-
-`XCOIN_NATPMP=0` keeps the stratum port off your router unless you mean to
-publish it. `XCOIN_STRATUM_PORT` must not be 3333 (the mainnet default) and
-`XCOIN_RPC_PORT` must not be 8332 (the mainnet node's RPC,
-`src/chainparamsbase.cpp`) or 9333 (its P2P port).
+On macOS the cookie is `"$HOME/Library/Application Support/NEX/.cookie"`. The defaults
+are mainnet's: RPC `127.0.0.1:8332`, stratum `0.0.0.0:3333`, `xpa` addresses. Then start
+NerdMiner with `--pool 127.0.0.1:3333 --base 1790380800`. `XCOIN_NATPMP=0` keeps the
+stratum port off your router, and `XCOIN_STATS_DIR` keeps this pool's files out of
+`~/.xcoin`.
 
 ## The browser miner: `ws-bridge.py`
 
@@ -89,14 +83,14 @@ python3 xcoin-pool/ws-bridge.py --listen 127.0.0.1:3336 --pool 127.0.0.1:3335 \
 of browser origins; with none given any origin is accepted. `XCOIN_WS_LISTEN` and
 `XCOIN_WS_POOL` are the environment forms of the two addresses. The bridge
 listens on loopback and is published by a TLS terminator in front of it (the
-rehearsal uses a tunnel ingress pointing at `http://127.0.0.1:3336`, reached as
+public solo pool uses a tunnel ingress pointing at `http://127.0.0.1:3336`, reached as
 `wss://superknet.com/stratum`). A plain HTTP `GET /` answers
 `xcoin stratum websocket ok`, which is what the tunnel's health check and
 `pool-install.sh` look for.
 
 ## Numbered browser sessions
 
-A miner that names itself (`txa1r….rig1`) is registered under that name. A browser
+A miner that names itself (`xpa1r….rig1`) is registered under that name. A browser
 tab uses the site's default worker name (`web` or `web-solo`), and the pool turns
 every such session into its own numbered rig: `web-solo-00001`, `web-solo-00002`,
 … The counter lives in `XCOIN_STATS_DIR/web_session_seq.txt`, survives restarts and
@@ -105,13 +99,7 @@ instead of one merged entry. After `mining.authorize` the pool tells the miner t
 name it is registered under with a `client.show_message` notice
 (`registered as web-solo-00042`); a miner that ignores the notice loses nothing.
 
-## Run it against mainnet (once mainnet exists)
-
-```bash
-export XCOIN_RPC_COOKIE=<datadir>/.cookie      # the node writes it on every start; mainnet datadir root
-# defaults: RPC 127.0.0.1:8332, stratum 0.0.0.0:3333, xpa addresses
-python3 xcoin-pool.py
-```
+## Block templates on mainnet
 
 On mainnet the node serves `getblocktemplate` only while it has at least one peer
 and is not in initial block download; otherwise the RPC fails with `-9 ... is not
@@ -136,9 +124,10 @@ from the gate, as upstream, and never need it.
 
 ## Fees and the settlement levy
 
-The pool is **solo and coinbase-only**: it pays the miner the template's whole
-`coinbasevalue` (subsidy for the height's emission era **plus** the fees the node
-collected) and keeps nothing.
+In solo mode (the default) the pool is **coinbase-only**: it pays the miner the
+template's whole `coinbasevalue` (subsidy for the height's emission era **plus** the fees
+the node collected) and keeps nothing. PPLNS mode splits the same `coinbasevalue` across
+coinbase outputs (below).
 
 It builds **no non-coinbase transaction**. The chain ships with no settlement
 levy (REGENESIS.md section 6: the genesis schedule row is zero rate, zero cap; a
@@ -155,7 +144,7 @@ RPC call.
 | Var | Default | Meaning |
 |---|---|---|
 | `XCOIN_RPC_HOST` / `XCOIN_RPC_PORT` | `127.0.0.1` / `8332` | node JSON-RPC, mainnet's port per `src/chainparamsbase.cpp` (rehearsal: `19432`) |
-| `XCOIN_RPC_COOKIE` | — (preferred) | path of the node's cookie file, `<datadir>/<chain>/.cookie`; no password exists anywhere |
+| `XCOIN_RPC_COOKIE` | — (preferred) | path of the node's cookie file: `<datadir>/.cookie` on mainnet, `<datadir>/regtest/.cookie` on regtest; no password exists anywhere |
 | `XCOIN_RPC_USER` / `XCOIN_RPC_PASSWORD` | — (fallback) | a secret in the environment; the pool warns (see `contrib/regenesis/WALLET-SECRETS.md`) |
 | `XCOIN_STRATUM_HOST` / `XCOIN_STRATUM_PORT` | `0.0.0.0` / `3333` | where miners connect (use another port for the rehearsal chain) |
 | `XCOIN_ADDRESS_HRP` | `xpa` | address prefix: `xpa` mainnet, `txa` rehearsal, `nxrt` regtest |
@@ -187,7 +176,8 @@ code when the pool is down.
 
 ## Notes
 
-- This is **solo** mining: you compete for whole blocks; there is no reward sharing.
+- In solo mode you compete for whole blocks; there is no reward sharing. PPLNS mode
+  (below) shares every block's coinbase among the miners of the last shares.
 - **AuxPoW merge-mining is not active.** It is a future consensus upgrade and
   must not be advertised as launch functionality.
 
