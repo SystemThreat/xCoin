@@ -75,11 +75,15 @@ Known and unchanged on purpose
   stay. On a machine that also runs `bitcoind` or `litecoind`, set `rpcport=` and/or
   `port=` in `nex.conf` (README, "Ports").
 - `nexd -testnet` still refuses to start: testnet A is retired.
-- **Keep `-v2hybrid=2` (require) off on public nodes.** Require mode refuses every inbound
-  v1 connection. A new 31.99.0 node makes its first contact over v1 whatever the seed
-  runs, so a node that newcomers reach through the seeds would turn away every new
-  31.99.0 node. Leave public nodes on the default `-v2hybrid=1` (prefer) until the
-  31.99.0 nodes have upgraded, even though a new 31.99.1 node's first contact is v2.
+- **Update 2026-10-25: the public nodes run `-v2hybrid=2` (require).** At release this
+  note said to keep require off on public nodes until the 31.99.0 nodes had upgraded,
+  because require refuses every inbound v1 connection and a new 31.99.0 node makes its
+  first contact over v1. By 2026-10-25 every node seen on the network ran 31.99.1, and a
+  brand-new 31.99.1 node was checked joining the public nodes in require mode over HX1,
+  through the DNS seeds and through the fixed seeds alone, so the public nodes switched.
+  A brand-new 31.99.0 node now finds no peers through the seeds: upgrade it, or give it
+  the `addnode` lines in the README ("If it finds no peers"), which it tries over v2
+  first. On your own node keep the default `-v2hybrid=1` (prefer).
 
 Upgrade in place
 ----------------

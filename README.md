@@ -187,8 +187,9 @@ What to expect:
   extra entry with a short `branchlen` is a stale block and harmless.
 - The node is in sync when `getblockchaininfo` shows `"initialblockdownload": false` and
   `"blocks"` equals `"headers"`, and both match the explorer's `height`, give or take the
-  block in flight. The chain is young; a fresh node caught up in under a minute in
-  September 2026.
+  block in flight. Allow a few minutes: the node checks the proof of work on every header,
+  about 90 headers a second on a small VPS, so in October 2026 (height 8,900) the headers
+  alone took about two and a half minutes, and that grows with the chain.
 - The tip must be the explorer's tip. Compare the hash at your height:
 
   ```sh
@@ -205,8 +206,8 @@ What to expect:
 
 If `getconnectioncount` stays at 0 for more than a minute, your resolver is probably not
 answering for the DNS seeds. The node then falls back to the fixed seeds compiled into it
-(the five public nodes below in 31.99.1; 31.99.0 carried only the first). You can add
-them yourself at once:
+(the first five public nodes below in 31.99.1; 31.99.0 carried only the first). You can
+add them, and the public nodes started since, yourself at once:
 
 ```sh
 build/bin/nex-cli addnode 172.96.186.49:9333 onetry     # New York
@@ -214,6 +215,9 @@ build/bin/nex-cli addnode 198.252.107.13:9333 onetry    # Hong Kong
 build/bin/nex-cli addnode 103.119.217.105:9333 onetry   # London
 build/bin/nex-cli addnode 198.252.101.117:9333 onetry   # Singapore
 build/bin/nex-cli addnode 54.20.130.14:9333 onetry      # São Paulo
+build/bin/nex-cli addnode 136.118.128.212:9333 onetry   # Oregon
+build/bin/nex-cli addnode 130.94.110.58:9333 onetry     # Bogotá
+build/bin/nex-cli addnode 130.94.38.127:9333 onetry     # Johannesburg
 ```
 
 or keep them in `nex.conf`, one `addnode=` line each (`addnode=172.96.186.49` and so on;
@@ -227,10 +231,12 @@ key exchange layered on BIP324's classical one, so recording the traffic today a
 breaking elliptic curves later does not reveal it. `-v2hybrid` sets the mode: `1`
 (prefer, the default) uses HX1 with every peer that takes part and stays classical with
 one that does not; `2` (require) disconnects such peers and never falls back to v1; `0`
-turns it off. Leave the default: on a young network `require` can leave a node with
-fewer peers, and a listening node in `require` refuses every inbound v1 connection, so a
-new 31.99.0 node, whose first contact is v1 (below), cannot connect to it. Public nodes in
-particular stay on `prefer` until the 31.99.0 nodes have upgraded.
+turns it off. Leave the default on your node: on a young network `require` can leave a
+node with fewer peers, and a listening node in `require` refuses every inbound v1
+connection. The public nodes under [If it finds no peers](#if-it-finds-no-peers) have run
+`require` since 2026-10-25, so they accept HX1 sessions only: a 31.99.1 node reaches them
+over HX1 from its first connection, and a brand-new 31.99.0 node does not get in through
+the seeds (below).
 
 Check it:
 
@@ -242,15 +248,18 @@ build/bin/nex-cli getnetworkinfo | grep -A8 '"v2hybrid"'
 A post-quantum session shows `"transport_protocol_type": "v2"` and
 `"transport_hybrid": true`; `v2hybrid_counts` counts the handshake outcomes since start.
 
-The first sync may be classical. The DNS and fixed seeds hand out bare addresses that say
-nothing about v2, and 31.99.0, in the default mode, treats such an address as v1-only: a
-brand-new 31.99.0 node makes its first connections, and its whole first sync, over plain v1,
-and uses HX1 once it has met its peers (after its first restart, for example). 31.99.1
-tries v2 with HX1 on seed addresses first and falls back to v1 when the v2 attempt is closed
-before the peer answers: a peer that does not speak v2, or one with no free inbound slot. On
-either version, a peer given with `-addnode` or `addnode` is tried over v2 first, so the
-`addnode` lines under [If it finds no peers](#if-it-finds-no-peers) give even a new 31.99.0
-node HX1 connections to those peers from the start.
+First contact. The DNS and fixed seeds hand out bare addresses that say nothing about v2.
+31.99.1 tries v2 with HX1 on seed addresses first and falls back to v1 when the v2 attempt
+is closed before the peer answers: a peer that does not speak v2, or one with no free
+inbound slot. Checked on 2026-10-25 with the public nodes in `require`: a brand-new 31.99.1
+node had its first peers within ten seconds and every connection on HX1, through the DNS
+seeds and through the fixed seeds alone. 31.99.0, in the default mode, treats a seed
+address as v1-only, so a brand-new 31.99.0 node opens its first connections over plain v1,
+the public nodes refuse them, and it finds no peers: upgrade it to 31.99.1. On either
+version a peer given with `-addnode` or `addnode` is tried over v2 first, so the `addnode`
+lines under [If it finds no peers](#if-it-finds-no-peers) also get a new 31.99.0 node in,
+over HX1. A 31.99.0 node that has already met its peers keeps them: it has learned that
+they speak v2.
 
 ### Ports
 
